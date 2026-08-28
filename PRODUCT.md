@@ -6,7 +6,7 @@ product
 
 ## Users
 
-A student working on a Windows PC, usually immediately after receiving a lecture recording. They need one reliable place to find a lecture, begin a new one, and eventually turn it into a structured study note without losing track of their materials.
+A student working on a Windows PC (Windows 10/11 x64) or Mac (macOS 13+ Ventura or newer on Apple Silicon arm64 or Intel x86_64), usually immediately after receiving a lecture recording. They need one reliable place to find a lecture, begin a new one, and eventually turn it into a structured study note without losing track of their materials.
 
 ## Product Purpose
 
@@ -30,4 +30,4 @@ Avoid playful education-game motifs, loud gradients, excessive dashboards, and g
 
 ## Accessibility & Inclusion
 
-Use high-contrast text, a readable system typeface, keyboard-operable controls, and respect Windows reduced-motion preferences where available. Animation must remain short and never conceal content.
+Use high-contrast text, readable system typefaces (Segoe UI on Windows, San Francisco / Helvetica Neue on macOS), keyboard-operable controls with native shortcuts (`Ctrl` on Windows, `⌘` on macOS), and respect platform reduced-motion and high-contrast preferences where available. Animation must remain short and never conceal content.

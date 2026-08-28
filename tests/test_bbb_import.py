@@ -4,20 +4,20 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from konspekt.bbb_import import (
     BBBImportError,
     BBBRecording,
     inspect_bbb_recording,
     load_library,
+    load_library_with_quarantine,
     save_to_library,
 )
 
-
 MEETING_ID = "f0a35ad2f6165a2fbce2f5d9e6ca241673f63bf8-1758353019485"
 PLAYBACK_URL = (
-    "https://bbb-lb.tsi.lv/playback/presentation/2.0/playback.html"
-    f"?meetingId={MEETING_ID}"
+    f"https://bbb-lb.tsi.lv/playback/presentation/2.0/playback.html?meetingId={MEETING_ID}"
 )
 
 
@@ -106,9 +106,7 @@ class BBBImportTests(unittest.TestCase):
             source_url=first.source_url.replace("bbb-lb.tsi.lv", "bbb.other.test"),
             title="Second host",
             imported_at="2026-07-15T11:00:00+00:00",
-            audio_video_url=first.audio_video_url.replace(
-                "bbb-lb.tsi.lv", "bbb.other.test"
-            ),
+            audio_video_url=first.audio_video_url.replace("bbb-lb.tsi.lv", "bbb.other.test"),
             screen_video_url=None,
             slides=(),
         )
@@ -121,6 +119,95 @@ class BBBImportTests(unittest.TestCase):
 
         self.assertEqual(len(loaded), 2)
         self.assertEqual({item.title for item in loaded}, {"First host", "Second host"})
+
+    def test_quarantines_malformed_row_and_preserves_valid_rows(self) -> None:
+        valid_recording = {
+            "meeting_id": "valid-meeting-1",
+            "source_url": "https://bbb.example.test/valid",
+            "title": "Valid Lecture",
+            "imported_at": "2026-08-01T12:00:00+00:00",
+            "audio_video_url": "https://bbb.example.test/video.mp4",
+            "screen_video_url": None,
+            "slides": [],
+        }
+        corrupted_row = {"unexpected": "payload", "broken": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.json"
+            path.write_text(
+                json.dumps({"schema_version": 1, "recordings": [valid_recording, corrupted_row]}),
+                encoding="utf-8",
+            )
+
+            loaded, quarantine = load_library_with_quarantine(path)
+
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].meeting_id, "valid-meeting-1")
+            self.assertIsNotNone(quarantine)
+            self.assertTrue(quarantine.is_file())
+            self.assertIn("library-corrupt-", quarantine.name)
+
+            # Check that re-reading the library file now contains only the valid sanitized row
+            reloaded = load_library(path)
+            self.assertEqual(len(reloaded), 1)
+            self.assertEqual(reloaded[0].meeting_id, "valid-meeting-1")
+
+    def test_handles_unknown_version_forward_compatibility(self) -> None:
+        valid_recording = {
+            "meeting_id": "future-meeting",
+            "source_url": "https://bbb.example.test/future",
+            "title": "Future Lecture",
+            "imported_at": "2026-08-01T12:00:00+00:00",
+            "audio_video_url": "https://bbb.example.test/video.mp4",
+            "screen_video_url": None,
+            "slides": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.json"
+            path.write_text(
+                json.dumps({"schema_version": 99, "recordings": [valid_recording]}),
+                encoding="utf-8",
+            )
+
+            loaded = load_library(path)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].meeting_id, "future-meeting")
+
+    def test_quarantines_corrupted_json_and_raises_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.json"
+            path.write_text(
+                '{"schema_version": 1, "recordings": [{"meeting_id": "truncated', encoding="utf-8"
+            )
+
+            with self.assertRaises(BBBImportError):
+                load_library(path)
+
+            corrupt_backups = list(Path(directory).glob("library-corrupt-*.json"))
+            self.assertEqual(len(corrupt_backups), 1)
+            self.assertIn("truncated", corrupt_backups[0].read_text(encoding="utf-8"))
+
+    def test_read_only_directory_quarantine_fallback(self) -> None:
+        valid_recording = {
+            "meeting_id": "valid-m",
+            "source_url": "https://bbb.example.test/v",
+            "title": "Valid",
+            "imported_at": "2026-08-01T12:00:00+00:00",
+            "audio_video_url": "https://bbb.example.test/v.mp4",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.json"
+            path.write_text(
+                json.dumps([valid_recording, {"corrupt": True}]),
+                encoding="utf-8",
+            )
+
+            # Mock quarantine write to fail with PermissionError
+            with patch("konspekt.bbb_import._quarantine_backup", return_value=None):
+                loaded = load_library(path)
+                self.assertEqual(len(loaded), 1)
+                self.assertEqual(loaded[0].meeting_id, "valid-m")
 
 
 if __name__ == "__main__":

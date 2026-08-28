@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
@@ -13,7 +12,10 @@ from xml.etree import ElementTree
 
 import requests
 
+from .atomic_io import AtomicIOError, atomic_write_json
 from .bbb_download import RecordingInfo, parse_playback_url
+
+LIBRARY_SCHEMA_VERSION = 1
 
 
 class BBBImportError(RuntimeError):
@@ -53,15 +55,35 @@ class BBBRecording:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "BBBRecording":
+    def from_dict(cls, payload: dict[str, Any]) -> BBBRecording:
+        if not isinstance(payload, dict):
+            raise ValueError("Данные записи должны быть словарём.")
+        meeting_id = str(payload.get("meeting_id", "")).strip()
+        source_url = str(payload.get("source_url", "")).strip()
+        title = str(payload.get("title", "")).strip()
+        imported_at = str(payload.get("imported_at", "")).strip()
+        audio_video_url = str(payload.get("audio_video_url", "")).strip()
+        if not (meeting_id and source_url and title and imported_at and audio_video_url):
+            raise ValueError("Запись не содержит обязательных полей.")
+        raw_slides = payload.get("slides")
+        slides: list[SlideInfo] = []
+        if isinstance(raw_slides, (list, tuple)):
+            for item in raw_slides:
+                if isinstance(item, dict):
+                    ident = str(item.get("identifier", "")).strip() or "slide"
+                    text = str(item.get("text", ""))
+                    img = item.get("image_url")
+                    slides.append(
+                        SlideInfo(identifier=ident, text=text, image_url=str(img) if img else None)
+                    )
         return cls(
-            meeting_id=str(payload["meeting_id"]),
-            source_url=str(payload["source_url"]),
-            title=str(payload["title"]),
-            imported_at=str(payload["imported_at"]),
-            audio_video_url=str(payload["audio_video_url"]),
+            meeting_id=meeting_id,
+            source_url=source_url,
+            title=title,
+            imported_at=imported_at,
+            audio_video_url=audio_video_url,
             screen_video_url=payload.get("screen_video_url"),
-            slides=tuple(SlideInfo(**slide) for slide in payload.get("slides", [])),
+            slides=tuple(slides),
         )
 
 
@@ -74,11 +96,7 @@ def inspect_bbb_recording(
     *,
     session: requests.Session | Any | None = None,
 ) -> BBBRecording:
-    """Find the playback assets that can later be used to build a lesson.
-
-    This only checks small metadata documents and HTTP headers. It never starts
-    a multi-gigabyte download of the lecture media.
-    """
+    """Find the playback assets that can later be used to build a lesson."""
 
     try:
         info = parse_playback_url(playback_url.strip())
@@ -114,22 +132,74 @@ def inspect_bbb_recording(
 
 
 def load_library(path: Path | None = None) -> list[BBBRecording]:
-    """Return locally saved recordings, newest first."""
+    """Return locally saved recordings, newest first, quarantining corrupt rows."""
+
+    recordings, _ = load_library_with_quarantine(path)
+    return recordings
+
+
+def load_library_with_quarantine(
+    path: Path | None = None,
+) -> tuple[list[BBBRecording], Path | None]:
+    """Load library and quarantine corrupted entries if any exist."""
 
     library_path = path or default_library_path()
     if not library_path.is_file():
-        return []
+        return [], None
+
     try:
-        payload = json.loads(library_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw_text = library_path.read_text(encoding="utf-8")
+    except OSError as exc:
         raise BBBImportError("Не удалось прочитать локальную библиотеку лекций.") from exc
 
-    recordings = [BBBRecording.from_dict(item) for item in payload]
-    return sorted(recordings, key=lambda item: item.imported_at, reverse=True)
+    if not raw_text.strip():
+        return [], None
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        quarantine_path = _quarantine_backup(library_path, raw_text)
+        raise BBBImportError(
+            f"Файл библиотеки повреждён. Резервная копия сохранена: {quarantine_path.name if quarantine_path else 'не удалось записать'}"
+        ) from exc
+
+    raw_recordings: list[Any]
+    if isinstance(payload, dict):
+        raw_recordings = payload.get("recordings", [])
+        if not isinstance(raw_recordings, list):
+            quarantine_path = _quarantine_backup(library_path, raw_text)
+            return [], quarantine_path
+    elif isinstance(payload, list):
+        raw_recordings = payload
+    else:
+        quarantine_path = _quarantine_backup(library_path, raw_text)
+        return [], quarantine_path
+
+    valid_recordings: list[BBBRecording] = []
+    has_malformed = False
+
+    for item in raw_recordings:
+        try:
+            recording = BBBRecording.from_dict(item)
+            valid_recordings.append(recording)
+        except (TypeError, ValueError, KeyError):
+            has_malformed = True
+
+    quarantine_path: Path | None = None
+    if has_malformed:
+        quarantine_path = _quarantine_backup(library_path, raw_text)
+        # Resave the sanitized valid records
+        try:
+            _write_library_file(library_path, valid_recordings)
+        except (AtomicIOError, OSError):
+            pass
+
+    sorted_recordings = sorted(valid_recordings, key=lambda item: item.imported_at, reverse=True)
+    return sorted_recordings, quarantine_path
 
 
 def save_to_library(recording: BBBRecording, path: Path | None = None) -> None:
-    """Persist one recording, replacing only the same recording from the same BBB."""
+    """Persist one recording atomically, replacing only the same recording from the same BBB."""
 
     library_path = path or default_library_path()
     existing = load_library(library_path)
@@ -137,20 +207,42 @@ def save_to_library(recording: BBBRecording, path: Path | None = None) -> None:
     updated = [item for item in existing if recording_identity(item) != identity]
     updated.insert(0, recording)
 
-    library_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = library_path.with_suffix(f"{library_path.suffix}.tmp")
-    temporary_path.write_text(
-        json.dumps([item.to_dict() for item in updated], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary_path.replace(library_path)
+    _write_library_file(library_path, updated)
+
+
+def _write_library_file(library_path: Path, recordings: list[BBBRecording]) -> None:
+    payload = {
+        "schema_version": LIBRARY_SCHEMA_VERSION,
+        "recordings": [item.to_dict() for item in recordings],
+    }
+    try:
+        atomic_write_json(library_path, payload, ensure_ascii=False, indent=2)
+    except (AtomicIOError, OSError) as exc:
+        raise BBBImportError(f"Не удалось сохранить библиотеку лекций: {exc}") from exc
+
+
+def save_library(recordings: list[BBBRecording], path: Path | None = None) -> None:
+    """Save a list of recordings atomically to library.json."""
+    library_path = path or default_library_path()
+    _write_library_file(library_path, recordings)
+
+
+def _quarantine_backup(library_path: Path, content: str) -> Path | None:
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    backup_path = library_path.with_name(f"library-corrupt-{timestamp}.json")
+    try:
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path.write_text(content, encoding="utf-8")
+        return backup_path
+    except OSError:
+        return None
 
 
 def default_library_path() -> Path:
-    """Keep study metadata in the user's local application-data directory."""
+    """Keep study metadata in the platform application-data directory."""
+    from .platform_services import PlatformAppPaths
 
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "Konspekt" / "library.json"
+    return PlatformAppPaths().data_dir / "library.json"
 
 
 def recording_identity(recording: BBBRecording) -> tuple[str, str]:

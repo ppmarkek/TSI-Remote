@@ -10,10 +10,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from ctypes import wintypes
-
+from .atomic_io import AtomicIOError, atomic_write_json
 from .bbb_import import default_library_path
-
+from .platform_services import KeyringSecretStore, SecretStore, SecretStoreError
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -21,6 +20,7 @@ DEFAULT_CHATGPT_MODEL = "gpt-5.5"
 SUPPORTED_PROVIDERS = ("openai", "deepseek")
 SUPPORTED_WHISPER_MODELS = ("tiny", "base", "small")
 SUPPORTED_FRAME_INTERVALS = (30, 60, 90)
+SERVICE_NAME = "Konspekt"
 
 
 class SettingsError(RuntimeError):
@@ -56,8 +56,11 @@ def default_model_for_provider(provider: str) -> str:
     return DEFAULT_DEEPSEEK_MODEL if provider == "deepseek" else DEFAULT_OPENAI_MODEL
 
 
-def load_settings(path: Path | None = None) -> AppSettings:
-    """Load settings and decrypt the API key for the current Windows user."""
+def load_settings(
+    path: Path | None = None,
+    secret_store: SecretStore | None = None,
+) -> AppSettings:
+    """Load settings and retrieve the API key from the keyring or legacy store."""
 
     settings_path = path or default_settings_path()
     if not settings_path.is_file():
@@ -75,9 +78,7 @@ def load_settings(path: Path | None = None) -> AppSettings:
         provider = "openai"
 
     model = str(payload.get("api_model", "")).strip() or default_model_for_provider(provider)
-    chatgpt_model = (
-        str(payload.get("chatgpt_model", "")).strip() or DEFAULT_CHATGPT_MODEL
-    )
+    chatgpt_model = str(payload.get("chatgpt_model", "")).strip() or DEFAULT_CHATGPT_MODEL
     whisper_model = str(payload.get("whisper_model", "base")).strip().lower()
     if whisper_model not in SUPPORTED_WHISPER_MODELS:
         whisper_model = "base"
@@ -89,14 +90,33 @@ def load_settings(path: Path | None = None) -> AppSettings:
     if frame_interval not in SUPPORTED_FRAME_INTERVALS:
         frame_interval = 60
 
-    protected_key = str(payload.get("api_key_protected", "")).strip()
+    store = secret_store or KeyringSecretStore()
     api_key = ""
+
+    protected_key = str(payload.get("api_key_protected", "")).strip()
     if protected_key:
         try:
-            api_key = _unprotect_secret(protected_key)
+            decrypted = _unprotect_secret(protected_key)
+            if decrypted:
+                api_key = decrypted
         except SettingsError:
-            # Keep non-secret preferences usable when an old key cannot be decrypted.
             api_key = ""
+
+    if not api_key and secret_store is not None:
+        try:
+            retrieved = store.get_secret(SERVICE_NAME, "api_key")
+            if retrieved:
+                api_key = retrieved
+        except SecretStoreError:
+            pass
+
+    if not api_key and not protected_key:
+        try:
+            retrieved = store.get_secret(SERVICE_NAME, "api_key")
+            if retrieved:
+                api_key = retrieved
+        except SecretStoreError:
+            pass
 
     settings = AppSettings(
         api_provider=provider,
@@ -110,29 +130,36 @@ def load_settings(path: Path | None = None) -> AppSettings:
     return _with_environment_key(settings)
 
 
-def save_settings(settings: AppSettings, path: Path | None = None) -> Path:
-    """Atomically save preferences, protecting the key with Windows DPAPI."""
+def save_settings(
+    settings: AppSettings,
+    path: Path | None = None,
+    secret_store: SecretStore | None = None,
+) -> Path:
+    """Atomically save preferences and store the API key in the platform SecretStore."""
 
     validated = _validated(settings)
     settings_path = path or default_settings_path()
     payload: dict[str, Any] = asdict(validated)
     api_key = str(payload.pop("api_key", "")).strip()
     payload["schema_version"] = 1
-    payload["api_key_protected"] = _protect_secret(api_key) if api_key else ""
 
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = settings_path.with_name(f"{settings_path.name}.tmp")
+    store = secret_store or KeyringSecretStore()
     try:
-        temporary_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary_path.replace(settings_path)
-    except OSError as exc:
-        try:
-            temporary_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if api_key:
+            store.set_secret(SERVICE_NAME, "api_key", api_key)
+        else:
+            store.delete_secret(SERVICE_NAME, "api_key")
+    except SecretStoreError:
+        pass
+
+    try:
+        payload["api_key_protected"] = _protect_secret(api_key) if api_key else ""
+    except SettingsError:
+        payload["api_key_protected"] = ""
+
+    try:
+        atomic_write_json(settings_path, payload, ensure_ascii=False, indent=2)
+    except (AtomicIOError, OSError) as exc:
         raise SettingsError("Не удалось сохранить настройки приложения.") from exc
     return settings_path
 
@@ -181,13 +208,6 @@ def _with_environment_key(settings: AppSettings) -> AppSettings:
     )
 
 
-class _DataBlob(ctypes.Structure):
-    _fields_ = [
-        ("cbData", wintypes.DWORD),
-        ("pbData", ctypes.POINTER(ctypes.c_ubyte)),
-    ]
-
-
 def _protect_secret(secret: str) -> str:
     if not secret:
         return ""
@@ -207,8 +227,18 @@ def _unprotect_secret(protected: str) -> str:
 
 
 def _crypt_protect(data: bytes) -> bytes:
+    if os.name != "nt":
+        raise SettingsError(
+            "Безопасное сохранение API-ключа через DPAPI доступно только в Windows."
+        )
+    from ctypes import wintypes
+
+    class _DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
     crypt32, kernel32 = _windows_crypto()
-    input_blob, input_buffer = _make_blob(data)
+    buffer = ctypes.create_string_buffer(data)
+    input_blob = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
     output_blob = _DataBlob()
     result = crypt32.CryptProtectData(
         ctypes.byref(input_blob),
@@ -216,18 +246,28 @@ def _crypt_protect(data: bytes) -> bytes:
         None,
         None,
         None,
-        0x01,  # CRYPTPROTECT_UI_FORBIDDEN
+        0x01,
         ctypes.byref(output_blob),
     )
-    del input_buffer
     if not result:
         raise SettingsError("Windows не смог защитить API-ключ.")
-    return _copy_and_free_blob(output_blob, kernel32)
+    try:
+        return ctypes.string_at(output_blob.pbData, output_blob.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(output_blob.pbData, wintypes.HLOCAL))
 
 
 def _crypt_unprotect(data: bytes) -> bytes:
+    if os.name != "nt":
+        raise SettingsError("Безопасное чтение API-ключа через DPAPI доступно только в Windows.")
+    from ctypes import wintypes
+
+    class _DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
     crypt32, kernel32 = _windows_crypto()
-    input_blob, input_buffer = _make_blob(data)
+    buffer = ctypes.create_string_buffer(data)
+    input_blob = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
     output_blob = _DataBlob()
     result = crypt32.CryptUnprotectData(
         ctypes.byref(input_blob),
@@ -235,18 +275,22 @@ def _crypt_unprotect(data: bytes) -> bytes:
         None,
         None,
         None,
-        0x01,  # CRYPTPROTECT_UI_FORBIDDEN
+        0x01,
         ctypes.byref(output_blob),
     )
-    del input_buffer
     if not result:
         raise SettingsError("Windows не смог расшифровать сохранённый API-ключ.")
-    return _copy_and_free_blob(output_blob, kernel32)
+    try:
+        return ctypes.string_at(output_blob.pbData, output_blob.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(output_blob.pbData, wintypes.HLOCAL))
 
 
 def _windows_crypto() -> tuple[Any, Any]:
     if os.name != "nt":
         raise SettingsError("Безопасное сохранение API-ключа доступно только в Windows.")
+    from ctypes import wintypes
+
     crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     crypt32.CryptProtectData.restype = wintypes.BOOL
@@ -254,19 +298,3 @@ def _windows_crypto() -> tuple[Any, Any]:
     kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
     kernel32.LocalFree.restype = wintypes.HLOCAL
     return crypt32, kernel32
-
-
-def _make_blob(data: bytes) -> tuple[_DataBlob, Any]:
-    buffer = ctypes.create_string_buffer(data)
-    blob = _DataBlob(
-        len(data),
-        ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)),
-    )
-    return blob, buffer
-
-
-def _copy_and_free_blob(blob: _DataBlob, kernel32: Any) -> bytes:
-    try:
-        return ctypes.string_at(blob.pbData, blob.cbData)
-    finally:
-        kernel32.LocalFree(ctypes.cast(blob.pbData, wintypes.HLOCAL))

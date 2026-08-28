@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import unittest
-from datetime import timedelta, timezone as fixed_timezone
+from datetime import timedelta
+from datetime import timezone as fixed_timezone
 
 from konspekt import bbb_import
 
