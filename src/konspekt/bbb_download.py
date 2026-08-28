@@ -102,7 +102,12 @@ def resolve_ffmpeg() -> str | None:
     else:
         base = Path(__file__).resolve().parent
 
-    for candidate in (base / "ffmpeg.exe", base / "ffmpeg" / "ffmpeg.exe"):
+    for candidate in (
+        base / "ffmpeg.exe",
+        base / "ffmpeg",
+        base / "ffmpeg" / "ffmpeg.exe",
+        base / "ffmpeg" / "ffmpeg",
+    ):
         if candidate.is_file():
             return str(candidate)
 

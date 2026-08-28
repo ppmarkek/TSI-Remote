@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .bbb_import import BBBRecording, save_to_library
-from .lecture_manifest import LectureManifest, file_sha256
+from .lecture_manifest import LectureManifest, compute_lecture_id, file_sha256
 from .local_pipeline import default_lecture_directory
 
 SUPPORTED_MEDIA_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav", ".mkv", ".webm", ".aac"}
@@ -44,12 +44,19 @@ def import_local_media_file(
         source_url=f"local://{media_path.name}",
         title=title,
         imported_at=datetime.now(timezone.utc).isoformat(),
-        audio_video_url=str(media_path.resolve()),
+        # The source is represented relative to the lecture directory.  The
+        # pipeline can therefore resume it without treating a local path as
+        # an HTTP URL or leaking an absolute user path into the library.
+        audio_video_url="local://audio.mp4",
         screen_video_url=None,
         slides=(),
+        lecture_id=compute_lecture_id(f"local://{media_path.name}", meeting_id),
     )
 
-    resolved_base_dir = base_dir or (library_path.parent if library_path else None)
+    resolved_library_path = library_path or (base_dir / "library.json" if base_dir else None)
+    resolved_base_dir = base_dir or (
+        resolved_library_path.parent if resolved_library_path else None
+    )
     lec_dir = default_lecture_directory(recording, base_dir=resolved_base_dir)
     lec_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,6 +78,6 @@ def import_local_media_file(
     manifest.save(lec_dir / "lecture-manifest.json")
 
     # Persist in library
-    save_to_library(recording, path=library_path)
+    save_to_library(recording, path=resolved_library_path)
 
     return recording, lec_dir

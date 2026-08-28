@@ -10,6 +10,7 @@ from typing import Any
 
 from .atomic_io import AtomicIOError, atomic_write_json, atomic_write_text
 from .bbb_import import BBBRecording, SlideInfo
+from .job_runner import CancellationToken
 from .local_pipeline import ScreenNote, TranscriptSegment, default_lecture_directory
 from .outbound_context import (
     OutboundContext,
@@ -44,10 +45,13 @@ class ContextPackage:
     outbound_context: OutboundContext | None = None
 
 
-def context_package_is_ready(recording: BBBRecording) -> bool:
+def context_package_is_ready(
+    recording: BBBRecording,
+    base_dir: Path | None = None,
+) -> bool:
     """Return whether the lecture already has the two files needed for a chat."""
 
-    target = default_lecture_directory(recording)
+    target = default_lecture_directory(recording, base_dir=base_dir)
     return (target / "lesson-context.md").is_file() and (target / "lesson-prompt.md").is_file()
 
 
@@ -58,6 +62,7 @@ def build_context_package(
     progress: ProgressCallback | None = None,
     max_block_seconds: int = 150,
     max_block_characters: int = 2600,
+    cancellation_token: CancellationToken | None = None,
 ) -> ContextPackage:
     """Create compact, attachable context without invoking an LLM or external API."""
 
@@ -65,6 +70,8 @@ def build_context_package(
         raise ValueError("Context block limits must be positive")
 
     notify = progress or _do_nothing
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
     target = directory or default_lecture_directory(recording)
     transcript_path = target / "transcript.json"
     if not transcript_path.is_file():
@@ -74,6 +81,8 @@ def build_context_package(
 
     notify(10, "Проверяем подготовленные материалы…")
     notify(25, "Собираем транскрипцию по временным блокам…")
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
     segments = _read_transcript(transcript_path)
     blocks = _group_transcript(
         segments,
@@ -82,6 +91,8 @@ def build_context_package(
     )
 
     notify(55, "Объединяем текст слайдов и заметки с экрана…")
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
     slides = _unique_slides(recording.slides)
     screen_notes = _read_screen_notes(target / "screen-notes.json")
 
@@ -101,6 +112,8 @@ def build_context_package(
     markdown_path = target / "lesson-context.md"
     prompt_path = target / "lesson-prompt.md"
     notify(78, "Создаём Markdown и структурированные данные…")
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
 
     try:
         atomic_write_json(

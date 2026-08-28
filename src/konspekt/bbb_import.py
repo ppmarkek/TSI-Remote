@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,7 @@ import requests
 
 from .atomic_io import AtomicIOError, atomic_write_json
 from .bbb_download import RecordingInfo, parse_playback_url
+from .lecture_manifest import compute_lecture_id
 
 LIBRARY_SCHEMA_VERSION = 1
 
@@ -42,6 +43,10 @@ class BBBRecording:
     audio_video_url: str
     screen_video_url: str | None
     slides: tuple[SlideInfo, ...]
+    # Persisted identity, independent of mutable import timestamps or titles.
+    # ``None`` is accepted for backwards-compatible reads of legacy libraries;
+    # save_to_library() fills it deterministically.
+    lecture_id: str | None = None
 
     @property
     def has_screen_share(self) -> bool:
@@ -84,6 +89,10 @@ class BBBRecording:
             audio_video_url=audio_video_url,
             screen_video_url=payload.get("screen_video_url"),
             slides=tuple(slides),
+            lecture_id=(
+                str(payload.get("lecture_id", "")).strip()
+                or compute_lecture_id(source_url, meeting_id)
+            ),
         )
 
 
@@ -186,8 +195,13 @@ def load_library_with_quarantine(
             has_malformed = True
 
     quarantine_path: Path | None = None
-    if has_malformed:
-        quarantine_path = _quarantine_backup(library_path, raw_text)
+    needs_identity_migration = any(
+        isinstance(item, dict) and not str(item.get("lecture_id", "")).strip()
+        for item in raw_recordings
+    )
+    if has_malformed or needs_identity_migration:
+        if has_malformed:
+            quarantine_path = _quarantine_backup(library_path, raw_text)
         # Resave the sanitized valid records
         try:
             _write_library_file(library_path, valid_recordings)
@@ -202,18 +216,29 @@ def save_to_library(recording: BBBRecording, path: Path | None = None) -> None:
     """Persist one recording atomically, replacing only the same recording from the same BBB."""
 
     library_path = path or default_library_path()
+    persisted = recording
+    if not recording.lecture_id:
+        persisted = replace(
+            recording, lecture_id=compute_lecture_id(recording.source_url, recording.meeting_id)
+        )
     existing = load_library(library_path)
-    identity = recording_identity(recording)
+    identity = recording_identity(persisted)
     updated = [item for item in existing if recording_identity(item) != identity]
-    updated.insert(0, recording)
+    updated.insert(0, persisted)
 
     _write_library_file(library_path, updated)
 
 
 def _write_library_file(library_path: Path, recordings: list[BBBRecording]) -> None:
+    persisted_recordings = [
+        item
+        if item.lecture_id
+        else replace(item, lecture_id=compute_lecture_id(item.source_url, item.meeting_id))
+        for item in recordings
+    ]
     payload = {
         "schema_version": LIBRARY_SCHEMA_VERSION,
-        "recordings": [item.to_dict() for item in recordings],
+        "recordings": [item.to_dict() for item in persisted_recordings],
     }
     try:
         atomic_write_json(library_path, payload, ensure_ascii=False, indent=2)
@@ -260,9 +285,11 @@ def _source_origin(source_url: str) -> str:
         port = parsed.port
     except ValueError:
         port = None
+    scheme = parsed.scheme.casefold()
+    prefix = f"{scheme}://" if scheme else ""
     if port and port not in {80, 443}:
-        return f"{host}:{port}"
-    return host
+        host = f"{host}:{port}"
+    return f"{prefix}{host}"
 
 
 def format_imported_at(value: str, *, timezone: tzinfo | None = None) -> str:

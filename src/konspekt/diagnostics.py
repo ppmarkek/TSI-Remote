@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .lecture_manifest import MANIFEST_SCHEMA_VERSION
+from .outbound_context import redact_sensitive_strings
 from .platform_services import (
     PlatformAppPaths,
     PlatformDependencyLocator,
@@ -35,8 +36,10 @@ def record_exception(area: str, error: BaseException) -> Path | None:
         trace = "".join(
             traceback.format_exception(type(error), error, error.__traceback__)
         ).rstrip()
+        safe_area = redact_sensitive_strings(str(area))
+        safe_trace = redact_sensitive_strings(trace)
         with path.open("a", encoding="utf-8", newline="\n") as output:
-            output.write(f"[{timestamp}] {area}\n{trace}\n\n")
+            output.write(f"[{timestamp}] {safe_area}\n{safe_trace}\n\n")
     except OSError:
         return None
     return path

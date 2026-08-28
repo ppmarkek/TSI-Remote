@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -43,7 +44,10 @@ def filter_and_sort_recordings(
 
     if state_filter is not None and base_dir is not None:
         result = [
-            r for r in result if resolve_lecture_state(base_dir / r.meeting_id) == state_filter
+            r
+            for r in result
+            if resolve_lecture_state(default_lecture_directory(r, base_dir=base_dir))
+            == state_filter
         ]
 
     if sort_by == "title_asc":
@@ -62,6 +66,7 @@ def rename_recording(
     library_path: Path,
     meeting_id: str,
     new_title: str,
+    source_url: str | None = None,
 ) -> list[BBBRecording]:
     """Rename a lecture in library.json safely while keeping original identifiers intact."""
     clean_title = new_title.strip()
@@ -71,8 +76,14 @@ def rename_recording(
     recordings = load_library(library_path)
     updated: list[BBBRecording] = []
     found = False
+    from .bbb_import import _source_origin
+
+    target_origin = _source_origin(source_url) if source_url else None
     for r in recordings:
-        if r.meeting_id == meeting_id:
+        matches = r.meeting_id == meeting_id and (
+            target_origin is None or _source_origin(r.source_url) == target_origin
+        )
+        if matches:
             updated.append(
                 BBBRecording(
                     meeting_id=r.meeting_id,
@@ -93,6 +104,34 @@ def rename_recording(
 
     save_library(updated, path=library_path)
     return updated
+
+
+def calculate_library_size(
+    recordings: list[BBBRecording],
+    base_dir: Path,
+) -> int:
+    """Return the size of active lecture material without following symlinks."""
+    total = 0
+    seen: set[Path] = set()
+    for recording in recordings:
+        directory = default_lecture_directory(recording, base_dir=base_dir)
+        if not directory.is_dir():
+            legacy = base_dir / recording.meeting_id
+            directory = legacy if legacy.is_dir() else directory
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
 
 
 def export_lecture_archive(
@@ -176,6 +215,15 @@ def move_to_trash(
     lec_dir = default_lecture_directory(target_rec, base_dir=base_dir)
     if not lec_dir.is_dir() and (base_dir / target_rec.meeting_id).is_dir():
         lec_dir = base_dir / target_rec.meeting_id
+    if not lec_dir.is_dir():
+        # Locate caches created before lecture_id was persisted.  The legacy
+        # collision suffix was deterministic, so this remains safe to migrate.
+        legacy_digest = hashlib.sha256(
+            repr((_source_origin(target_rec.source_url), target_rec.meeting_id)).encode("utf-8")
+        ).hexdigest()[:12]
+        legacy_dir = base_dir / "lectures" / f"{target_rec.meeting_id[:80]}-{legacy_digest}"
+        if legacy_dir.is_dir():
+            lec_dir = legacy_dir
 
     total_size = 0
     if lec_dir.is_dir():

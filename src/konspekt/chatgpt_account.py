@@ -591,8 +591,16 @@ def _account_status_from_response(response: dict[str, Any]) -> ChatGPTAccountSta
 
 
 def _codex_home() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "Konspekt" / "Codex"
+    # Keep app-server state in the same platform-owned root as the library.
+    # Never manufacture a Windows ``~/AppData`` path on macOS.
+    from .platform_services import PlatformAppPaths
+
+    configured = os.environ.get("KONSPEKT_CODEX_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    if "LOCALAPPDATA" in os.environ:
+        return Path(os.environ["LOCALAPPDATA"]) / "Konspekt" / "Codex"
+    return PlatformAppPaths().data_dir / "Codex"
 
 
 def _codex_environment() -> dict[str, str]:

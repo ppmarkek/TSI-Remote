@@ -65,6 +65,23 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e ".[dev,local-ai]"
 
+      - name: Install Tesseract OCR runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus
+
+      - name: Install Tesseract OCR runtime
+        if: runner.os == 'macOS'
+        run: brew install tesseract
+
+      - name: Install Tesseract OCR runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+          "$env:ProgramFiles\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Build Application Package
         run: |
           python scripts/build_package.py

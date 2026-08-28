@@ -107,16 +107,22 @@ def load_settings(
             retrieved = store.get_secret(SERVICE_NAME, "api_key")
             if retrieved:
                 api_key = retrieved
-        except SecretStoreError:
-            pass
+        except SecretStoreError as exc:
+            if secret_store is not None:
+                raise SettingsError(
+                    "Не удалось прочитать API-ключ из системного хранилища."
+                ) from exc
 
     if not api_key and not protected_key:
         try:
             retrieved = store.get_secret(SERVICE_NAME, "api_key")
             if retrieved:
                 api_key = retrieved
-        except SecretStoreError:
-            pass
+        except SecretStoreError as exc:
+            if secret_store is not None:
+                raise SettingsError(
+                    "Не удалось прочитать API-ключ из системного хранилища."
+                ) from exc
 
     settings = AppSettings(
         api_provider=provider,
@@ -144,18 +150,33 @@ def save_settings(
     payload["schema_version"] = 1
 
     store = secret_store or KeyringSecretStore()
+    secret_store_error: SecretStoreError | None = None
     try:
         if api_key:
             store.set_secret(SERVICE_NAME, "api_key", api_key)
         else:
             store.delete_secret(SERVICE_NAME, "api_key")
-    except SecretStoreError:
-        pass
+    except SecretStoreError as exc:
+        # An explicitly injected store is always a hard failure (and is how
+        # callers/tests detect a locked keychain).  For the ambient keyring,
+        # continue only if a protected fallback can be written below.
+        if secret_store is not None:
+            raise SettingsError(
+                "Не удалось сохранить API-ключ в системном хранилище. "
+                "Разблокируй Keychain/Credential Manager и повтори попытку."
+            ) from exc
+        secret_store_error = exc
 
     try:
         payload["api_key_protected"] = _protect_secret(api_key) if api_key else ""
     except SettingsError:
         payload["api_key_protected"] = ""
+
+    if secret_store_error is not None and api_key and not payload["api_key_protected"]:
+        raise SettingsError(
+            "Не удалось сохранить API-ключ в системном хранилище. "
+            "Разблокируй Keychain/Credential Manager и повтори попытку."
+        ) from secret_store_error
 
     try:
         atomic_write_json(settings_path, payload, ensure_ascii=False, indent=2)

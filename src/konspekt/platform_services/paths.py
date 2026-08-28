@@ -28,7 +28,15 @@ class PlatformAppPaths:
     def data_dir(self) -> Path:
         if self.test_root is not None:
             return self.test_root / "data"
-        if "LOCALAPPDATA" in os.environ:
+        configured = os.environ.get("KONSPEKT_DATA_DIR", "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        # A caller may provide LOCALAPPDATA explicitly in an isolated test or
+        # Windows-compatible runtime.  Never use it when macOS is selected
+        # explicitly; macOS otherwise follows platformdirs.
+        if "LOCALAPPDATA" in os.environ and (
+            self.system_override is None or self._system == "win32"
+        ):
             return Path(os.environ["LOCALAPPDATA"]) / self.app_name
         if self._system == "win32":
             return Path.home() / "AppData" / "Local" / self.app_name
@@ -38,18 +46,27 @@ class PlatformAppPaths:
     def cache_dir(self) -> Path:
         if self.test_root is not None:
             return self.test_root / "cache"
+        configured = os.environ.get("KONSPEKT_CACHE_DIR", "").strip()
+        if configured:
+            return Path(configured).expanduser()
         return Path(platformdirs.user_cache_dir(self.app_name, self.app_author))
 
     @property
     def log_dir(self) -> Path:
         if self.test_root is not None:
             return self.test_root / "logs"
+        configured = os.environ.get("KONSPEKT_LOG_DIR", "").strip()
+        if configured:
+            return Path(configured).expanduser()
         return Path(platformdirs.user_log_dir(self.app_name, self.app_author))
 
     @property
     def temp_dir(self) -> Path:
         if self.test_root is not None:
             return self.test_root / "temp"
+        configured = os.environ.get("KONSPEKT_TEMP_DIR", "").strip()
+        if configured:
+            return Path(configured).expanduser()
         return Path(tempfile.gettempdir()) / self.app_name
 
     @property

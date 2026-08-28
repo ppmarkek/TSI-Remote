@@ -26,7 +26,14 @@ def compute_lecture_id(source_url: str, meeting_id: str) -> str:
     clean_meeting = re.sub(r"[^\w\-.]", "_", meeting_id.strip())
     try:
         parsed = urlparse(source_url)
-        origin = f"{parsed.scheme}://{parsed.netloc}".strip().lower()
+        host = (parsed.hostname or parsed.netloc).strip().lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port and port not in {80, 443}:
+            host = f"{host}:{port}"
+        origin = f"{parsed.scheme.lower()}://{host}".strip()
     except Exception:
         origin = source_url.strip().lower()
 
@@ -192,12 +199,14 @@ class LectureManifest:
         directory: Path,
     ) -> LectureManifest:
         manifest_path = directory / "lecture-manifest.json"
+        lecture_id = compute_lecture_id(source_url, meeting_id)
         if manifest_path.is_file():
             try:
-                return cls.load(manifest_path)
+                loaded = cls.load(manifest_path)
+                if loaded.lecture_id == lecture_id and loaded.meeting_id == meeting_id:
+                    return loaded
             except ManifestError:
                 pass
-        lecture_id = compute_lecture_id(source_url, meeting_id)
         manifest = cls(
             lecture_id=lecture_id,
             meeting_id=meeting_id,

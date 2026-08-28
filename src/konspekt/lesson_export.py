@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import html
+import shutil
+import subprocess
 from pathlib import Path
 
 from .atomic_io import AtomicIOError, atomic_write_text
@@ -62,6 +64,10 @@ def render_lesson_html(
     pre, code {{ font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; background: #F3F6F4; padding: 2px 6px; border-radius: 4px; }}
     .toc {{ background: #F7FAF8; padding: 18px 24px; border-radius: 8px; border: 1px solid #DDE5E0; margin-bottom: 32px; }}
     ul {{ list-style-type: disc; padding-left: 20px; }}
+    @media print {{
+      body {{ margin: 0; max-width: none; }}
+      .toc {{ break-after: page; }}
+    }}
   </style>
 </head>
 <body>
@@ -89,4 +95,52 @@ def export_lesson_to_html_file(
         atomic_write_text(output_path, rendered, encoding="utf-8")
     except (AtomicIOError, OSError) as exc:
         raise RuntimeError(f"Не удалось экспортировать конспект в HTML: {exc}") from exc
+    return output_path
+
+
+def export_lesson_to_pdf_file(
+    title: str,
+    markdown_content: str,
+    output_path: Path,
+) -> Path:
+    """Export a lesson to PDF using an installed local renderer.
+
+    We deliberately do not send lesson text to a remote converter.  WeasyPrint
+    is preferred when installed; otherwise a local ``wkhtmltopdf`` binary is
+    used.  A clear error tells the user how to enable the optional capability.
+    """
+    rendered = render_lesson_html(title, markdown_content)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from weasyprint import HTML  # type: ignore[import-not-found]
+
+        HTML(string=rendered, base_url=str(output_path.parent)).write_pdf(str(output_path))
+        return output_path
+    except ImportError:
+        pass
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось экспортировать конспект в PDF: {exc}") from exc
+
+    converter = shutil.which("wkhtmltopdf")
+    if not converter:
+        raise RuntimeError(
+            "PDF-экспорт требует локальный WeasyPrint или wkhtmltopdf. "
+            "Установи один из них и повтори попытку."
+        )
+    temporary_html = output_path.with_suffix(".html.tmp")
+    try:
+        atomic_write_text(temporary_html, rendered, encoding="utf-8")
+        result = subprocess.run(
+            [converter, "--quiet", str(temporary_html), str(output_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        if result.returncode != 0 or not output_path.is_file():
+            raise RuntimeError("wkhtmltopdf не смог создать PDF-файл.")
+    except (AtomicIOError, OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Не удалось экспортировать конспект в PDF: {exc}") from exc
+    finally:
+        temporary_html.unlink(missing_ok=True)
     return output_path

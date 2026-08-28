@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 
@@ -36,6 +37,24 @@ def collect_shared_packaging_info(
         datas.append((str(assets_dir / "konspekt.png"), "assets"))
     if (assets_dir / "konspekt.svg").is_file():
         datas.append((str(assets_dir / "konspekt.svg"), "assets"))
+
+    # Bundle a local Tesseract binary and language data when the build host
+    # provides one.  The runtime smoke test treats OCR as a required package
+    # dependency, so a missing host binary fails the release gate explicitly.
+    tesseract_executable = shutil.which("tesseract")
+    if tesseract_executable:
+        tesseract_root = Path(tesseract_executable).parent
+        binaries.append((tesseract_executable, "tesseract"))
+        tessdata_candidates = (
+            tesseract_root / "tessdata",
+            tesseract_root.parent / "share" / "tessdata",
+        )
+        tessdata = next(
+            (candidate for candidate in tessdata_candidates if candidate.is_dir()), None
+        )
+        if tessdata is not None:
+            for language_file in tessdata.glob("*.traineddata"):
+                datas.append((str(language_file), "tesseract/tessdata"))
 
     try:
         from PyInstaller.utils.hooks import collect_all, collect_data_files

@@ -59,12 +59,16 @@ class KeyringSecretStore:
             if self._backend is not None:
                 self._backend.delete_password(service, account)
             elif keyring is not None:
-                try:
-                    keyring.delete_password(service, account)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                keyring.delete_password(service, account)
+        except SecretStoreError:
+            raise
+        except Exception as exc:
+            # Deletion is idempotent for a missing item, but a locked or
+            # unavailable keychain must be reported to callers.
+            missing_type = getattr(getattr(keyring, "errors", None), "PasswordDeleteError", None)
+            if isinstance(missing_type, type) and isinstance(exc, missing_type):
+                return
+            raise SecretStoreError("Не удалось удалить ключ из системного хранилища.") from None
 
 
 def migrate_legacy_windows_dpapi(

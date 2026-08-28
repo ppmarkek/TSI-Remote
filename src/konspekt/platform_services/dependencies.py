@@ -60,6 +60,10 @@ class PlatformDependencyLocator:
 
     def _candidate_paths(self, name: str) -> list[Path]:
         paths: list[Path] = [Path(p) for p in self.extra_paths]
+        bundle_value = getattr(sys, "_MEIPASS", None)
+        if bundle_value:
+            bundle_root = Path(bundle_value)
+            paths.extend([bundle_root, bundle_root / "tesseract", bundle_root / "ffmpeg"])
         home = Path.home()
 
         if self._system == "darwin":

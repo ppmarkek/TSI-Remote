@@ -44,13 +44,15 @@ _FORBIDDEN_PATH_PATTERN = re.compile(
     r"(?:/(?:Users|home|AppData|System|Library|var|tmp|private)[/\\][^\s]+|[A-Za-z]:\\[^\s]+)"
 )
 _FORBIDDEN_SECRET_PATTERN = re.compile(
-    r"(?:sk-[A-Za-z0-9_-]{10,}|Bearer\s+[A-Za-z0-9_.-]+|SECRET-[^\s]+|token=[^\s&]+)",
+    r"(?:sk-[A-Za-z0-9_-]{10,}|Bearer\s+[A-Za-z0-9_.-]+|SECRET-[^\s]+|"
+    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|token)\s*=\s*[^\s&]+)",
     re.IGNORECASE,
 )
 _FORBIDDEN_URL_PATTERN = re.compile(
-    r"(?:https?://[^\s]+|meetingId=[^\s&]+)",
+    r"(?:\b[a-z][a-z0-9+.-]{1,31}://[^\s]+|\b(?:meetingId|meeting_id)\s*=\s*[^\s&]+|\?[^\s]+)",
     re.IGNORECASE,
 )
+_FORBIDDEN_IDENTIFIER_PATTERN = re.compile(r"\b(?:[A-Za-z0-9_-]{24,}-\d{6,}|[A-Fa-f0-9]{24,})\b")
 
 
 @dataclass(frozen=True)
@@ -308,6 +310,7 @@ def redact_sensitive_strings(text: str) -> str:
     redacted = _FORBIDDEN_SECRET_PATTERN.sub("[REDACTED_SECRET]", text)
     redacted = _FORBIDDEN_URL_PATTERN.sub("[REDACTED_URL]", redacted)
     redacted = _FORBIDDEN_PATH_PATTERN.sub("[REDACTED_PATH]", redacted)
+    redacted = _FORBIDDEN_IDENTIFIER_PATTERN.sub("[REDACTED_ID]", redacted)
     return redacted
 
 

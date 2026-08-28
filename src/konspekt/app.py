@@ -47,13 +47,26 @@ from .deepseek_handoff import (
     prepare_deepseek_handoff,
 )
 from .diagnostics import record_exception
+from .job_runner import (
+    CancellationToken,
+    JobEvent,
+    JobEventType,
+    JobRunner,
+)
 from .lesson_output import (
     LessonOutputError,
     lesson_is_ready,
     read_generated_lesson,
     save_generated_lesson,
 )
+from .library_manager import (
+    calculate_library_size,
+    filter_and_sort_recordings,
+    move_to_trash,
+    rename_recording,
+)
 from .local_pipeline import LocalProcessingError, lecture_is_prepared, prepare_lecture
+from .markdown_reader import extract_table_of_contents, extract_timestamps
 from .settings import (
     AppSettings,
     SettingsError,
@@ -159,15 +172,28 @@ class StudyApp(tk.Tk):
         self.style = ttk.Style(self)
         self._configure_styles()
         self._current_screen: ttk.Frame | None = None
-        from .platform_services import PlatformAppPaths, migrate_legacy_data
+        from .platform_services import MigrationStatus, PlatformAppPaths, migrate_legacy_data
 
         self.app_paths = PlatformAppPaths()
+        migration_warning = ""
         try:
-            migrate_legacy_data(self.app_paths)
-        except Exception:
-            pass
-        self.settings, self._settings_load_warning = self._load_settings_safely()
+            migration = migrate_legacy_data(self.app_paths)
+            if migration.status in {MigrationStatus.CONFLICT, MigrationStatus.ERROR}:
+                migration_warning = migration.error_message or (
+                    "Не удалось безопасно перенести старые данные."
+                )
+        except Exception as exc:
+            migration_warning = "Не удалось проверить перенос старых данных."
+            record_exception("migration.startup", exc)
+        self.settings, settings_warning = self._load_settings_safely()
+        self._settings_load_warning = " ".join(
+            item for item in (migration_warning, settings_warning) if item
+        )
         self.library: list[BBBRecording] = self._load_library_safely()
+        self._library_query = tk.StringVar()
+        self._library_state_filter = tk.StringVar(value="Все состояния")
+        self._library_sort = tk.StringVar(value="Сначала новые")
+        self._library_storage_status = tk.StringVar()
         self._bbb_url = tk.StringVar()
         self._import_status = tk.StringVar()
         self._import_button: ttk.Button | None = None
@@ -188,6 +214,9 @@ class StudyApp(tk.Tk):
         self._processing_heartbeat_id = 0
         self._processing_operation_id = 0
         self._processing_diagnostic_path: Path | None = None
+        self._job_runner = JobRunner()
+        self._processing_token: CancellationToken | None = None
+        self._processing_cancel_button: ttk.Button | None = None
         self._active_processing_recording: BBBRecording | None = None
         self._active_processing_kind: str | None = None
         self._handoff_status = tk.StringVar()
@@ -224,6 +253,12 @@ class StudyApp(tk.Tk):
 
         self._build_shell()
         self.show_library(animated=False)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        """Cancel active work and wait briefly before closing the Tk shell."""
+        self._job_runner.shutdown(timeout_seconds=3.0)
+        self.destroy()
 
     @staticmethod
     def _load_app_icon() -> tk.PhotoImage | None:
@@ -859,7 +894,10 @@ class StudyApp(tk.Tk):
         self._set_active_chatgpt_model(proposed.chatgpt_model)
         self._settings_load_warning = ""
         if proposed.api_configured:
-            message = f"Сохранено. API {proposed.provider_label} подключён; ключ защищён Windows."
+            message = (
+                f"Сохранено. API {proposed.provider_label} подключён; "
+                "ключ хранится в системном защищённом хранилище."
+            )
         else:
             message = (
                 "Сохранено. API не подключён; личный ChatGPT и веб-чат DeepSeek остаются доступны."
@@ -882,6 +920,9 @@ class StudyApp(tk.Tk):
         operation_id = self._next_chatgpt_account_operation()
         self._set_chatgpt_status("Проверяем состояние входа…", PALETTE["muted"])
         self._set_chatgpt_controls_busy(True)
+        if hasattr(self, "_job_runner"):
+            self._start_chatgpt_account_job(False, operation_id)
+            return
         threading.Thread(
             target=self._chatgpt_account_worker,
             args=(False, operation_id),
@@ -898,11 +939,47 @@ class StudyApp(tk.Tk):
             PALETTE["muted"],
         )
         self._set_chatgpt_controls_busy(True)
+        if hasattr(self, "_job_runner"):
+            self._start_chatgpt_account_job(True, operation_id)
+            return
         threading.Thread(
             target=self._chatgpt_account_worker,
             args=(True, operation_id),
             daemon=True,
         ).start()
+
+    def _start_chatgpt_account_job(self, should_login: bool, operation_id: int) -> None:
+        def task(
+            token: CancellationToken, _: object
+        ) -> tuple[ChatGPTAccountStatus, list[ChatGPTModel], str]:
+            token.check_cancelled()
+            status = login_with_chatgpt() if should_login else chatgpt_account_status()
+            models: list[ChatGPTModel] = []
+            model_error = ""
+            if status.signed_in:
+                try:
+                    models = list_chatgpt_models()
+                except ChatGPTAccountError as exc:
+                    model_error = str(exc)
+            return status, models, model_error
+
+        def event_handler(event: JobEvent) -> None:
+            def apply_event() -> None:
+                if operation_id != self._chatgpt_account_operation_id:
+                    return
+                if event.event_type is JobEventType.COMPLETED and isinstance(event.result, tuple):
+                    status, models, model_error = event.result
+                    self._finish_chatgpt_account_refresh(operation_id, status, models, model_error)
+                elif event.event_type is JobEventType.CANCELLED:
+                    self._finish_chatgpt_account_error(operation_id, "Операция отменена.")
+                elif event.event_type is JobEventType.FAILED:
+                    self._finish_chatgpt_account_error(
+                        operation_id, event.error or "Не удалось проверить вход."
+                    )
+
+            self.after(0, apply_event)
+
+        self._job_runner.run_job(task, event_handler)
 
     def _chatgpt_account_worker(
         self,
@@ -1118,15 +1195,82 @@ class StudyApp(tk.Tk):
         listing = tk.Frame(screen, background=PALETTE["canvas"])
         listing.grid(row=2, column=0, sticky="nsew", pady=(22, 0))
         listing.grid_columnconfigure(0, weight=1)
-        listing.grid_rowconfigure(1, weight=1)
+        listing.grid_rowconfigure(2, weight=1)
 
+        toolbar = tk.Frame(listing, background=PALETTE["canvas"])
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        toolbar.grid_columnconfigure(0, weight=1)
+        search = ttk.Entry(toolbar, textvariable=self._library_query, width=30)
+        search.grid(row=0, column=0, sticky="ew")
+        search.insert(0, "")
+        search.configure(takefocus=True)
+        search.bind("<Return>", lambda _: self.show_library(animated=False))
+        ttk.Button(
+            toolbar,
+            text="Найти",
+            style="Secondary.TButton",
+            command=lambda: self.show_library(animated=False),
+        ).grid(row=0, column=1, padx=(8, 0))
+        state_values = (
+            "Все состояния",
+            "Импортировано",
+            "Подготовлено",
+            "Пакет готов",
+            "Конспект готов",
+        )
+        ttk.Combobox(
+            toolbar,
+            textvariable=self._library_state_filter,
+            values=state_values,
+            state="readonly",
+            width=18,
+        ).grid(row=0, column=2, padx=(8, 0))
+        ttk.Combobox(
+            toolbar,
+            textvariable=self._library_sort,
+            values=("Сначала новые", "Сначала старые", "По названию"),
+            state="readonly",
+            width=16,
+        ).grid(row=0, column=3, padx=(8, 0))
+        size = calculate_library_size(self.library, self.app_paths.data_dir)
+        self._library_storage_status.set(f"Занято: {self._format_bytes(size)}")
         tk.Label(
-            listing,
-            text=f"В библиотеке: {len(self.library)}",
+            toolbar,
+            textvariable=self._library_storage_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ).grid(row=0, column=4, padx=(12, 0))
+
+        state_map = {
+            "Импортировано": "imported",
+            "Подготовлено": "prepared",
+            "Пакет готов": "package_ready",
+            "Конспект готов": "lesson_ready",
+        }
+        state_filter = state_map.get(self._library_state_filter.get())
+        from .workflow import LectureState
+
+        filtered = filter_and_sort_recordings(
+            self.library,
+            query=self._library_query.get(),
+            state_filter=LectureState(state_filter) if state_filter else None,
+            sort_by=(
+                "title_asc"
+                if self._library_sort.get() == "По названию"
+                else "date_asc"
+                if self._library_sort.get() == "Сначала старые"
+                else "date_desc"
+            ),
+            base_dir=self.app_paths.data_dir,
+        )
+        tk.Label(
+            listing,
+            text=f"Показано: {len(filtered)} из {len(self.library)}",
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["canvas"],
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         canvas = tk.Canvas(
             listing,
@@ -1134,9 +1278,9 @@ class StudyApp(tk.Tk):
             highlightthickness=0,
             takefocus=True,
         )
-        canvas.grid(row=1, column=0, sticky="nsew")
+        canvas.grid(row=2, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(listing, orient="vertical", command=canvas.yview)
-        scrollbar.grid(row=1, column=1, sticky="ns", padx=(10, 0))
+        scrollbar.grid(row=2, column=1, sticky="ns", padx=(10, 0))
         canvas.configure(yscrollcommand=scrollbar.set)
 
         rows = tk.Frame(canvas, background=PALETTE["canvas"])
@@ -1158,7 +1302,7 @@ class StudyApp(tk.Tk):
         canvas.bind("<Home>", lambda _: canvas.yview_moveto(0.0))
         canvas.bind("<End>", lambda _: canvas.yview_moveto(1.0))
 
-        for index, recording in enumerate(self.library):
+        for index, recording in enumerate(filtered):
             row = tk.Frame(
                 rows,
                 background=PALETTE["surface_soft"],
@@ -1253,8 +1397,70 @@ class StudyApp(tk.Tk):
                 command=action,
                 state=action_state,
             ).grid(row=0, column=1, rowspan=4, sticky="e", padx=(18, 0))
+            management = tk.Frame(row, background=PALETTE["surface_soft"])
+            management.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            ttk.Button(
+                management,
+                text="Переименовать",
+                style="Secondary.TButton",
+                command=lambda item=recording: self._rename_library_recording(item),
+            ).pack(side="left")
+            ttk.Button(
+                management,
+                text="В корзину",
+                style="Secondary.TButton",
+                command=lambda item=recording: self._trash_library_recording(item),
+            ).pack(side="left", padx=(8, 0))
 
         self._bind_mousewheel_tree(canvas, canvas)
+
+    @staticmethod
+    def _format_bytes(value: int) -> str:
+        size = float(max(0, value))
+        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if size < 1024 or unit == "ТБ":
+                return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
+            size /= 1024
+        return "0 Б"
+
+    def _rename_library_recording(self, recording: BBBRecording) -> None:
+        from tkinter import simpledialog
+
+        title = simpledialog.askstring(
+            "Переименовать лекцию", "Новое название:", initialvalue=recording.title
+        )
+        if title is None:
+            return
+        try:
+            rename_recording(
+                self.app_paths.library_path,
+                recording.meeting_id,
+                title,
+                source_url=recording.source_url,
+            )
+            self.library = self._load_library_safely()
+            self.show_library(animated=False)
+        except (ValueError, BBBImportError) as exc:
+            self._set_import_status(str(exc), PALETTE["danger"])
+
+    def _trash_library_recording(self, recording: BBBRecording) -> None:
+        from tkinter import messagebox
+
+        if not messagebox.askyesno(
+            "Переместить в корзину", f"Переместить «{recording.title}» в корзину?"
+        ):
+            return
+        try:
+            move_to_trash(
+                self.app_paths.library_path,
+                recording.meeting_id,
+                self.app_paths.data_dir,
+                source_url=recording.source_url,
+            )
+            self.library = self._load_library_safely()
+            self.show_library(animated=False)
+        except (ValueError, BBBImportError, OSError) as exc:
+            self._set_import_status(str(exc), PALETTE["danger"])
 
     def show_new_lecture(self) -> None:
         self._import_status.set("")
@@ -1389,6 +1595,29 @@ class StudyApp(tk.Tk):
         if self._import_button is not None:
             self._import_button.state(["disabled"])
         self._set_import_status("Проверяем запись BBB и доступные материалы…", PALETTE["muted"])
+        if hasattr(self, "_job_runner"):
+
+            def task(token: CancellationToken, _: object) -> BBBRecording:
+                token.check_cancelled()
+                recording = inspect_bbb_recording(playback_url)
+                save_to_library(recording)
+                return recording
+
+            def on_event(event: JobEvent) -> None:
+                if event.event_type is JobEventType.COMPLETED:
+                    self.after(0, lambda: self._finish_import_success(event.result))
+                elif event.event_type is JobEventType.CANCELLED:
+                    self.after(0, lambda: self._finish_import_error("Импорт отменён."))
+                elif event.event_type is JobEventType.FAILED:
+                    self.after(
+                        0,
+                        lambda: self._finish_import_error(
+                            event.error or "Не удалось импортировать запись."
+                        ),
+                    )
+
+            self._job_runner.run_job(task, on_event)
+            return
         threading.Thread(
             target=self._import_bbb_worker,
             args=(playback_url,),
@@ -1464,11 +1693,18 @@ class StudyApp(tk.Tk):
             message="Подготовка начнётся после проверки локальных инструментов…",
         )
         self.show_processing_screen(recording)
-        threading.Thread(
-            target=self._local_processing_worker,
-            args=(recording, self.settings, operation_id),
-            daemon=True,
-        ).start()
+        self._start_durable_processing_job(
+            operation_id,
+            lambda token, progress: prepare_lecture(
+                recording,
+                model_name=self.settings.whisper_model,
+                frame_interval_seconds=self.settings.frame_interval_seconds,
+                enable_ocr=self.settings.ocr_enabled,
+                progress=progress,
+                cancellation_token=token,
+            ),
+            self._finish_processing_success,
+        )
 
     def start_context_packaging(self, recording: BBBRecording) -> None:
         if self._processing_active:
@@ -1486,11 +1722,74 @@ class StudyApp(tk.Tk):
                 "Нейросеть и платные API на этом шаге не используются."
             ),
         )
-        threading.Thread(
-            target=self._context_packaging_worker,
-            args=(recording, operation_id),
-            daemon=True,
-        ).start()
+        self._start_durable_processing_job(
+            operation_id,
+            lambda token, progress: build_context_package(
+                recording,
+                progress=progress,
+                cancellation_token=token,
+            ),
+            self._finish_context_package_success,
+        )
+
+    def _start_durable_processing_job(
+        self,
+        operation_id: int,
+        target,
+        on_success,
+    ) -> None:
+        """Run local preparation through JobRunner and marshal events to Tk."""
+        token = CancellationToken()
+        self._processing_token = token
+
+        def on_event(event: JobEvent) -> None:
+            self.after(
+                0,
+                lambda event=event: self._handle_processing_event(operation_id, event, on_success),
+            )
+
+        self._job_runner.run_job(target, on_event, token=token)
+
+    def _handle_processing_event(self, operation_id: int, event: JobEvent, on_success) -> None:
+        if not _operation_is_current(self, operation_id):
+            return
+        if event.event_type is JobEventType.PROGRESS:
+            self._set_processing_progress(event.percent, event.message)
+        elif event.event_type is JobEventType.COMPLETED:
+            self._processing_token = None
+            on_success(event.result)
+        elif event.event_type is JobEventType.CANCELLED:
+            self._processing_token = None
+            self._finish_processing_cancelled()
+        elif event.event_type is JobEventType.FAILED:
+            self._processing_token = None
+            error = RuntimeError(event.error or event.message or "Ошибка выполнения задачи.")
+            diagnostic_path = record_exception("processing.job", error)
+            self._processing_diagnostic_path = diagnostic_path
+            self._finish_processing_error(
+                event.error or "Подготовка остановлена из-за неожиданной ошибки."
+            )
+
+    def cancel_active_processing(self) -> None:
+        token = self._processing_token
+        if token is None or not self._processing_active:
+            return
+        token.cancel()
+        self._processing_status.set("Отменяем операцию…")
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.state(["disabled"])
+
+    def _finish_processing_cancelled(self) -> None:
+        self._processing_active = False
+        self._set_navigation_enabled(True)
+        self._processing_state.set("Отменено")
+        self._processing_percent.set("Отменено")
+        self._processing_status.set(
+            "Операция отменена. Уже скачанные материалы сохранены; её можно возобновить."
+        )
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.pack_forget()
+        self._enable_processing_return()
 
     def _prepare_processing_state(
         self,
@@ -1630,6 +1929,13 @@ class StudyApp(tk.Tk):
             state="disabled",
         )
         self._processing_return_button.pack(side="left")
+        self._processing_cancel_button = ttk.Button(
+            actions,
+            text="Отменить",
+            style="Secondary.TButton",
+            command=self.cancel_active_processing,
+        )
+        self._processing_cancel_button.pack(side="left", padx=(12, 0))
         tk.Label(
             panel,
             textvariable=self._processing_diagnostic,
@@ -2036,11 +2342,14 @@ class StudyApp(tk.Tk):
             provider_label = f"Личный ChatGPT ({selected_model})"
         elif flow_type == "deepseek_handoff":
             provider_label = "DeepSeek Web"
+            self._active_handoff = None
+            self._active_handoff_provider = None
             try:
-                self._active_handoff = prepare_deepseek_handoff(recording, target)
+                self._active_handoff = prepare_deepseek_handoff(recording, directory=target)
                 self._active_handoff_provider = "DeepSeek"
-            except Exception:
-                pass
+            except DeepSeekHandoffError as exc:
+                self._handoff_status.set(str(exc))
+                return
 
         size_kb = 0
         char_count = 0
@@ -2178,11 +2487,47 @@ class StudyApp(tk.Tk):
                 "Полученный Markdown будет сохранён как lesson.md на этом компьютере."
             ),
         )
+        if hasattr(self, "_job_runner"):
+            self._start_api_job(recording, self.settings, operation_id)
+            return
         threading.Thread(
             target=self._api_generation_worker,
             args=(recording, self.settings, operation_id),
             daemon=True,
         ).start()
+
+    def _start_api_job(
+        self,
+        recording: BBBRecording,
+        settings: AppSettings,
+        operation_id: int,
+    ) -> None:
+        def task(token: CancellationToken, progress) -> ApiLessonResult:
+            token.check_cancelled()
+            return generate_lesson_via_api(recording, settings, progress=progress)
+
+        def on_event(event: JobEvent) -> None:
+            def apply_event() -> None:
+                if not _operation_is_current(self, operation_id):
+                    return
+                if event.event_type is JobEventType.PROGRESS:
+                    self._set_processing_progress(event.percent, event.message)
+                elif event.event_type is JobEventType.COMPLETED:
+                    self._finish_api_generation_success(recording, event.result)
+                elif event.event_type is JobEventType.CANCELLED:
+                    self._finish_processing_cancelled()
+                elif event.event_type is JobEventType.FAILED:
+                    error = RuntimeError(event.error or event.message)
+                    self._processing_diagnostic_path = record_exception("generation.api", error)
+                    self._finish_processing_error(
+                        event.error or "Не удалось создать конспект через API."
+                    )
+
+            self.after(0, apply_event)
+
+        token = CancellationToken()
+        self._processing_token = token
+        self._job_runner.run_job(task, on_event, token=token)
 
     def _api_generation_worker(
         self,
@@ -2288,6 +2633,9 @@ class StudyApp(tk.Tk):
                 "твой вход в ChatGPT, а готовый Markdown сохраняется локально как lesson.md."
             ),
         )
+        if hasattr(self, "_job_runner"):
+            self._start_chatgpt_job(recording, selected_model, operation_id, account_operation_id)
+            return
         threading.Thread(
             target=self._chatgpt_generation_worker,
             args=(
@@ -2298,6 +2646,70 @@ class StudyApp(tk.Tk):
             ),
             daemon=True,
         ).start()
+
+    def _start_chatgpt_job(
+        self,
+        recording: BBBRecording,
+        model: str,
+        operation_id: int,
+        account_operation_id: int,
+    ) -> None:
+        def task(
+            token: CancellationToken, progress
+        ) -> tuple[ChatGPTGenerationResult, ChatGPTAccountStatus, list[ChatGPTModel], str]:
+            token.check_cancelled()
+            progress(10, "Проверяем вход в ChatGPT…")
+            status = chatgpt_account_status()
+            if not status.signed_in:
+                progress(
+                    20, "Заверши вход в открывшемся окне — генерация продолжится автоматически."
+                )
+                status = login_with_chatgpt()
+            if not status.signed_in:
+                raise ChatGPTAccountError(
+                    "Вход в ChatGPT не завершён. Повтори попытку и закончи авторизацию."
+                )
+            models: list[ChatGPTModel] = []
+            model_error = ""
+            try:
+                models = list_chatgpt_models()
+            except ChatGPTAccountError as exc:
+                model_error = str(exc)
+            progress(45, f"Готовим запрос для модели {model}…")
+            result = generate_lesson_with_chatgpt(
+                recording,
+                model,
+                progress=lambda percent, message: progress(
+                    min(95, 45 + max(0, min(100, percent)) // 2), message
+                ),
+            )
+            return result, status, models, model_error
+
+        def on_event(event: JobEvent) -> None:
+            def apply_event() -> None:
+                if not _operation_is_current(self, operation_id):
+                    return
+                if event.event_type is JobEventType.COMPLETED and isinstance(event.result, tuple):
+                    result, status, models, model_error = event.result
+                    self._finish_chatgpt_account_refresh(
+                        account_operation_id, status, models, model_error
+                    )
+                    self._finish_chatgpt_generation_success(recording, result)
+                elif event.event_type is JobEventType.CANCELLED:
+                    self._finish_processing_cancelled()
+                elif event.event_type is JobEventType.FAILED:
+                    error = RuntimeError(event.error or event.message)
+                    self._processing_diagnostic_path = record_exception("generation.chatgpt", error)
+                    self._finish_processing_error(
+                        event.error
+                        or "Неожиданная ошибка остановила создание конспекта через ChatGPT."
+                    )
+
+            self.after(0, apply_event)
+
+        token = CancellationToken()
+        self._processing_token = token
+        self._job_runner.run_job(task, on_event, token=token)
 
     def _chatgpt_generation_worker(
         self,
@@ -2432,6 +2844,8 @@ class StudyApp(tk.Tk):
 
     def _show_web_chat_handoff(self, recording: BBBRecording) -> None:
         provider = "DeepSeek"
+        self._active_handoff = None
+        self._active_handoff_provider = None
         try:
             handoff = prepare_deepseek_handoff(recording)
             description = (
@@ -2685,8 +3099,22 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
         ).grid(row=2, column=0, sticky="w", pady=(8, 18))
 
+        reader_area = tk.Frame(screen, background=PALETTE["canvas"])
+        reader_area.grid(row=3, column=0, sticky="nsew")
+        reader_area.grid_rowconfigure(0, weight=1)
+        reader_area.grid_columnconfigure(1, weight=1)
+        toc_list = tk.Listbox(
+            reader_area,
+            width=28,
+            exportselection=False,
+            background=PALETTE["surface_soft"],
+            foreground=PALETTE["ink"],
+            relief="solid",
+            borderwidth=1,
+        )
+        toc_list.grid(row=0, column=0, sticky="ns", padx=(0, 12))
         reader = scrolledtext.ScrolledText(
-            screen,
+            reader_area,
             font=self.type.body,
             foreground=PALETTE["ink"],
             background=PALETTE["surface_soft"],
@@ -2696,8 +3124,44 @@ class StudyApp(tk.Tk):
             padx=18,
             pady=16,
         )
-        reader.grid(row=3, column=0, sticky="nsew")
+        reader.grid(row=0, column=1, sticky="nsew")
         reader.insert("1.0", content)
+        toc_entries = extract_table_of_contents(content)
+        for entry in toc_entries:
+            toc_list.insert("end", f"{'  ' * (entry.level - 1)}{entry.title}")
+
+        def jump_to_toc(_: tk.Event | None = None) -> None:
+            selection = toc_list.curselection()
+            if selection:
+                reader.see(f"{toc_entries[selection[0]].line_number}.0")
+                reader.mark_set("insert", f"{toc_entries[selection[0]].line_number}.0")
+
+        toc_list.bind("<<ListboxSelect>>", jump_to_toc)
+        timestamp_lines = extract_timestamps(content)
+        reader.tag_configure("timestamp", foreground=PALETTE["primary"], underline=True)
+        for timestamp in timestamp_lines:
+            reader.tag_add(
+                "timestamp", f"{timestamp.line_number}.0", f"{timestamp.line_number}.end"
+            )
+
+        def show_timestamp(event: tk.Event) -> None:
+            index = reader.index(f"@{event.x},{event.y}")
+            line = int(str(index).split(".", 1)[0])
+            matching = [item for item in timestamp_lines if item.line_number == line]
+            if matching:
+                self._lesson_status.set(
+                    f"Таймкод {matching[0].raw_str} · {int(matching[0].total_seconds)} сек."
+                )
+
+        reader.tag_bind("timestamp", "<Button-1>", show_timestamp)
+
+        def update_reader_position(_: tk.Event | None = None) -> None:
+            current_line = int(str(reader.index("insert")).split(".", 1)[0])
+            total_lines = int(str(reader.index("end-1c")).split(".", 1)[0])
+            self._lesson_status.set(f"Позиция: строка {current_line} из {total_lines}")
+
+        reader.bind("<ButtonRelease-1>", update_reader_position, add="+")
+        reader.bind("<KeyRelease>", update_reader_position, add="+")
         actions = tk.Frame(screen, background=PALETTE["canvas"])
         actions.grid(row=4, column=0, sticky="ew", pady=(18, 0))
 
@@ -2735,7 +3199,7 @@ class StudyApp(tk.Tk):
                 initialfile=f"{recording.title[:40]}.zip",
             )
             if dest:
-                export_lecture_archive(recording, default_lecture_directory(recording), Path(dest))
+                export_lecture_archive(default_lecture_directory(recording), Path(dest))
 
         ttk.Button(
             actions,
@@ -2751,10 +3215,64 @@ class StudyApp(tk.Tk):
             command=export_zip,
         ).pack(side="left", padx=(10, 0))
 
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(actions, textvariable=search_var, width=22)
+        search_entry.pack(side="left", padx=(18, 0))
+
+        def find_next() -> None:
+            query = search_var.get().strip()
+            if not query:
+                return
+            start = reader.index("insert")
+            found = reader.search(query, start, nocase=True, stopindex="end")
+            if not found:
+                found = reader.search(query, "1.0", nocase=True, stopindex=start)
+            if found:
+                reader.tag_remove("search", "1.0", "end")
+                reader.tag_add("search", found, f"{found}+{len(query)}c")
+                reader.tag_configure("search", background="#FFF3B0")
+                reader.see(found)
+                reader.mark_set("insert", found)
+
+        ttk.Button(actions, text="Найти", style="Secondary.TButton", command=find_next).pack(
+            side="left", padx=(6, 0)
+        )
+
+        def export_pdf() -> None:
+            from tkinter import filedialog, messagebox
+
+            from .lesson_export import export_lesson_to_pdf_file
+
+            dest = filedialog.asksaveasfilename(
+                title="Экспорт конспекта в PDF",
+                defaultextension=".pdf",
+                filetypes=[("PDF документы", "*.pdf")],
+                initialfile=f"{recording.title[:40]}.pdf",
+            )
+            if not dest:
+                return
+            try:
+                export_lesson_to_pdf_file(recording.title, content, Path(dest))
+            except RuntimeError as exc:
+                messagebox.showerror("Экспорт PDF", str(exc))
+
+        ttk.Button(
+            actions, text="Экспорт в PDF", style="Secondary.TButton", command=export_pdf
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Label(
+            actions,
+            textvariable=self._lesson_status,
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["canvas"],
+        ).pack(side="left", padx=(12, 0))
+
         self._show_screen(screen, animated=True)
 
     def _finish_processing_error(self, message: str) -> None:
         self._processing_active = False
+        self._processing_token = None
         self._set_navigation_enabled(True)
         self._processing_state.set("Ошибка")
         self._processing_percent.set("Ошибка")
@@ -2792,6 +3310,8 @@ class StudyApp(tk.Tk):
                 padx=(0, 10),
             )
         self._enable_processing_return()
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.pack_forget()
 
     def _set_processing_progress(self, percent: int, message: str) -> None:
         """Show honest stage progress instead of estimating an unreliable duration."""
@@ -2822,6 +3342,7 @@ class StudyApp(tk.Tk):
 
     def _mark_processing_success(self) -> None:
         self._processing_active = False
+        self._processing_token = None
         self._set_navigation_enabled(True)
         self._processing_state.set("Готово")
         self._processing_percent.set("100%")
@@ -2834,6 +3355,8 @@ class StudyApp(tk.Tk):
         retry = self._processing_retry_button
         if retry is not None and retry.winfo_exists():
             retry.pack_forget()
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.pack_forget()
 
     def _enable_processing_return(self) -> None:
         if (
