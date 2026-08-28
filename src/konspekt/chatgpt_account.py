@@ -18,13 +18,15 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from .bbb_import import BBBRecording
 from .local_pipeline import default_lecture_directory
+from .outbound_context import OutboundContextError, _validate_outbound_text
 
 
 class ChatGPTAccountError(RuntimeError):
@@ -83,9 +85,7 @@ def list_chatgpt_models() -> list[ChatGPTModel]:
             timeout=_REQUEST_TIMEOUT_SECONDS,
         )
         if not _account_status_from_response(account).signed_in:
-            raise ChatGPTAccountError(
-                "Сначала войди в ChatGPT, чтобы загрузить доступные модели."
-            )
+            raise ChatGPTAccountError("Сначала войди в ChatGPT, чтобы загрузить доступные модели.")
 
         models: list[ChatGPTModel] = []
         seen_slugs: set[str] = set()
@@ -108,9 +108,7 @@ def list_chatgpt_models() -> list[ChatGPTModel]:
             for item in data:
                 if not isinstance(item, dict) or item.get("hidden") is True:
                     continue
-                slug = _clean_string(item.get("model")) or _clean_string(
-                    item.get("id")
-                )
+                slug = _clean_string(item.get("model")) or _clean_string(item.get("id"))
                 if not slug or slug in seen_slugs:
                     continue
                 display_name = _clean_string(item.get("displayName")) or slug
@@ -132,9 +130,7 @@ def list_chatgpt_models() -> list[ChatGPTModel]:
             )
 
     if not models:
-        raise ChatGPTAccountError(
-            "Для этого аккаунта ChatGPT не найдено доступных моделей."
-        )
+        raise ChatGPTAccountError("Для этого аккаунта ChatGPT не найдено доступных моделей.")
     return models
 
 
@@ -148,15 +144,11 @@ def login_with_chatgpt() -> ChatGPTAccountStatus:
             timeout=_REQUEST_TIMEOUT_SECONDS,
         )
         if response.get("type") != "chatgpt":
-            raise ChatGPTAccountError(
-                "Эта версия Codex не смогла начать вход через ChatGPT."
-            )
+            raise ChatGPTAccountError("Эта версия Codex не смогла начать вход через ChatGPT.")
         login_id = _clean_string(response.get("loginId"))
         auth_url = _clean_string(response.get("authUrl"))
         if not login_id or not auth_url:
-            raise ChatGPTAccountError(
-                "Codex не вернул данные для входа. Обнови Codex CLI."
-            )
+            raise ChatGPTAccountError("Codex не вернул данные для входа. Обнови Codex CLI.")
 
         helper = _start_auth_helper(auth_url)
         completed: dict[str, Any] | None = None
@@ -169,9 +161,7 @@ def login_with_chatgpt() -> ChatGPTAccountStatus:
             )
         except _AuthWindowClosed as exc:
             _cancel_login(server, login_id)
-            raise ChatGPTAccountError(
-                "Окно входа было закрыто до завершения авторизации."
-            ) from exc
+            raise ChatGPTAccountError("Окно входа было закрыто до завершения авторизации.") from exc
         except TimeoutError as exc:
             _cancel_login(server, login_id)
             raise ChatGPTAccountError(
@@ -181,9 +171,7 @@ def login_with_chatgpt() -> ChatGPTAccountStatus:
             _stop_process(helper)
 
         if not completed or completed.get("success") is not True:
-            raise ChatGPTAccountError(
-                "ChatGPT не подтвердил вход. Повтори попытку в новом окне."
-            )
+            raise ChatGPTAccountError("ChatGPT не подтвердил вход. Повтори попытку в новом окне.")
 
         account = server.request(
             "account/read",
@@ -220,6 +208,14 @@ def generate_lesson_with_chatgpt(
     context = _without_source_details(
         _read_lesson_input(target / "lesson-context.md", "контекст лекции")
     )
+    try:
+        forbidden = [recording.meeting_id, recording.source_url]
+        _validate_outbound_text("chatgpt_context", context, forbidden)
+        _validate_outbound_text("chatgpt_prompt", prompt, forbidden)
+    except OutboundContextError as exc:
+        raise ChatGPTAccountError(
+            f"Ошибка проверки безопасности передаваемых данных: {exc}"
+        ) from exc
     codex_executable = _codex_command()
     stdin_payload = (
         "Работай только с переданным ниже текстом. Не запускай команды и не читай "
@@ -397,25 +393,29 @@ class _AppServerSession:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ChatGPTAccountError("Codex app-server слишком долго не отвечает.")
-            message = self._next_message(remaining)
+            try:
+                message = self._next_message(remaining)
+            except queue.Empty:
+                raise ChatGPTAccountError("Codex app-server слишком долго не отвечает.")
             if message.get("id") != request_id:
                 self._pending.append(message)
                 continue
             return self._result_from_response(message, method)
 
     @staticmethod
-    def _result_from_response(
-        message: dict[str, Any], method: str
-    ) -> dict[str, Any]:
+    def _result_from_response(message: dict[str, Any], method: str) -> dict[str, Any]:
         if message.get("error") is not None:
-            raise ChatGPTAccountError(
-                f"Codex app-server отклонил запрос {method}."
-            )
+            err = message.get("error")
+            err_msg = ""
+            if isinstance(err, dict):
+                err_msg = str(err.get("message") or err)
+            else:
+                err_msg = str(err)
+            suffix = f": {err_msg}" if err_msg else "."
+            raise ChatGPTAccountError(f"Codex app-server отклонил запрос {method}{suffix}")
         result = message.get("result")
         if not isinstance(result, dict):
-            raise ChatGPTAccountError(
-                f"Codex app-server вернул неверный ответ на {method}."
-            )
+            raise ChatGPTAccountError(f"Codex app-server вернул неверный ответ на {method}.")
         return result
 
     def wait_for_notification(
@@ -450,11 +450,7 @@ class _AppServerSession:
                     raise _AuthWindowClosed
                 continue
             params = message.get("params")
-            if (
-                message.get("method") == method
-                and isinstance(params, dict)
-                and predicate(params)
-            ):
+            if message.get("method") == method and isinstance(params, dict) and predicate(params):
                 return params
             self._pending.append(message)
 
@@ -555,9 +551,7 @@ def _start_auth_helper(auth_url: str) -> subprocess.Popen[Any]:
             creationflags=_hidden_creation_flags(),
         )
     except OSError as exc:
-        raise ChatGPTAccountError(
-            "Не удалось открыть защищённое окно входа в ChatGPT."
-        ) from exc
+        raise ChatGPTAccountError("Не удалось открыть защищённое окно входа в ChatGPT.") from exc
 
 
 def _cancel_login(server: _AppServerSession, login_id: str) -> None:
@@ -615,15 +609,9 @@ def _ensure_codex_home() -> Path:
     with _CONFIG_LOCK:
         try:
             home.mkdir(parents=True, exist_ok=True)
-            existing = (
-                config_path.read_text(encoding="utf-8")
-                if config_path.is_file()
-                else ""
-            )
+            existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
             lines = existing.splitlines()
-            setting_pattern = re.compile(
-                r"^\s*cli_auth_credentials_store\s*=", re.IGNORECASE
-            )
+            setting_pattern = re.compile(r"^\s*cli_auth_credentials_store\s*=", re.IGNORECASE)
             filtered = [line for line in lines if not setting_pattern.match(line)]
             desired_lines = [_KEYRING_SETTING]
             if filtered:
@@ -666,9 +654,7 @@ def _codex_command() -> str:
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             return candidate
-    raise ChatGPTAccountError(
-        "Codex CLI не найден. Установи или обнови Codex и повтори попытку."
-    )
+    raise ChatGPTAccountError("Codex CLI не найден. Установи или обнови Codex и повтори попытку.")
 
 
 def _read_lesson_input(path: Path, label: str) -> str:
@@ -679,9 +665,7 @@ def _read_lesson_input(path: Path, label: str) -> str:
             f"Не удалось прочитать {label}. Сначала подготовь материалы лекции."
         ) from exc
     if not value.strip():
-        raise ChatGPTAccountError(
-            f"Файл «{label}» пуст. Сначала повтори подготовку материалов."
-        )
+        raise ChatGPTAccountError(f"Файл «{label}» пуст. Сначала повтори подготовку материалов.")
     return value
 
 

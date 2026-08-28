@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import requests
 
 from .bbb_import import BBBRecording
 from .lesson_output import SavedLesson, save_generated_lesson
 from .local_pipeline import default_lecture_directory
+from .outbound_context import OutboundContextError, _validate_outbound_text
 from .settings import AppSettings
-
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -54,6 +55,15 @@ def generate_lesson_via_api(
         raise ApiGenerationError("Не удалось прочитать локальный пакет контекста.") from exc
     if not context.strip() or not prompt:
         raise ApiGenerationError("Локальный пакет контекста пуст или повреждён.")
+
+    try:
+        forbidden = [recording.meeting_id, recording.source_url]
+        _validate_outbound_text("api_context", context, forbidden)
+        _validate_outbound_text("api_prompt", prompt, forbidden)
+    except OutboundContextError as exc:
+        raise ApiGenerationError(
+            f"Ошибка проверки безопасности передаваемых данных: {exc}"
+        ) from exc
 
     notify = progress or _do_nothing
     notify(8, "Проверяем локальный текстовый пакет…")
@@ -107,9 +117,7 @@ def generate_lesson_via_api(
             markdown = _deepseek_output_text(body)
         markdown = _clean_markdown(markdown)
         if not markdown:
-            raise ApiGenerationError(
-                "API вернул пустой ответ. Локальные материалы не изменены."
-            )
+            raise ApiGenerationError("API вернул пустой ответ. Локальные материалы не изменены.")
 
         saved = save_generated_lesson(recording, markdown, directory=target)
         notify(100, "Конспект создан и сохранён локально.")

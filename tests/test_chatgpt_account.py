@@ -6,10 +6,11 @@ import os
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 from konspekt.bbb_import import BBBRecording
 from konspekt.chatgpt_account import (
@@ -268,9 +269,7 @@ class ChatGPTAccountTests(unittest.TestCase):
             server.calls[0],
             ("account/login/start", {"type": "chatgpt"}),
         )
-        start_helper.assert_called_once_with(
-            "https://auth.openai.com/oauth/authorize?state=secret"
-        )
+        start_helper.assert_called_once_with("https://auth.openai.com/oauth/authorize?state=secret")
         self.assertTrue(helper.terminated)
 
     def test_auth_url_is_not_put_on_helper_command_line(self) -> None:
@@ -422,9 +421,7 @@ class ChatGPTAccountTests(unittest.TestCase):
                     self.recording,
                     "gpt-5.2-codex",
                     directory=directory,
-                    progress=lambda percent, message: progress.append(
-                        (percent, message)
-                    ),
+                    progress=lambda percent, message: progress.append((percent, message)),
                 )
             saved = (directory / "lesson.md").read_text(encoding="utf-8")
             temporary_outputs = list(directory.glob(".lesson-chatgpt-*.tmp"))
@@ -439,16 +436,12 @@ class ChatGPTAccountTests(unittest.TestCase):
         self.assertEqual(command[:2], ["codex.cmd", "exec"])
         self.assertIn("--ephemeral", command)
         config_values = [
-            command[index + 1]
-            for index, item in enumerate(command[:-1])
-            if item == "-c"
+            command[index + 1] for index, item in enumerate(command[:-1]) if item == "-c"
         ]
         self.assertIn('cli_auth_credentials_store="keyring"', config_values)
         self.assertIn('web_search="disabled"', config_values)
         disabled_features = [
-            command[index + 1]
-            for index, item in enumerate(command[:-1])
-            if item == "--disable"
+            command[index + 1] for index, item in enumerate(command[:-1]) if item == "--disable"
         ]
         self.assertEqual(
             disabled_features,
@@ -535,6 +528,41 @@ class ChatGPTAccountTests(unittest.TestCase):
 
         self.assertEqual(saved, "# Existing\n")
         self.assertEqual(temporary_outputs, [])
+
+    def test_queue_empty_and_timeout_normalize_to_chatgpt_account_error(self) -> None:
+        import queue
+
+        process = FakeWireProcess("")
+        session = _AppServerSession(process)  # type: ignore[arg-type]
+        session._messages.get = MagicMock(side_effect=queue.Empty)  # type: ignore[method-assign]
+
+        with self.assertRaises(ChatGPTAccountError) as exc_info:
+            session.request("test/timeout", {}, timeout=0.01)
+
+        self.assertIn("слишком долго не отвечает", str(exc_info.exception))
+
+    def test_unexpected_eof_and_stream_closed_normalizes_to_chatgpt_account_error(self) -> None:
+        process = FakeWireProcess("")
+        session = _AppServerSession(process)  # type: ignore[arg-type]
+        # Allow background thread to hit EOF and put _StreamClosed
+        import time
+
+        time.sleep(0.05)
+
+        with self.assertRaises(ChatGPTAccountError) as exc_info:
+            session.request("test/eof", {}, timeout=1.0)
+
+        self.assertIn("неожиданно завершил работу", str(exc_info.exception))
+
+    def test_app_server_error_response_normalizes_to_chatgpt_account_error(self) -> None:
+        wire = '{"id":0,"error":{"message":"custom error from codex"}}\n'
+        process = FakeWireProcess(wire)
+        session = _AppServerSession(process)  # type: ignore[arg-type]
+
+        with self.assertRaises(ChatGPTAccountError) as exc_info:
+            session.request("test/err", {}, timeout=1.0)
+
+        self.assertIn("custom error from codex", str(exc_info.exception))
 
 
 if __name__ == "__main__":

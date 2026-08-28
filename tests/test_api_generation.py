@@ -88,9 +88,7 @@ class ApiGenerationTests(unittest.TestCase):
                 self.recording,
                 self.settings,
                 directory=directory,
-                progress=lambda percent, message: progress_updates.append(
-                    (percent, message)
-                ),
+                progress=lambda percent, message: progress_updates.append((percent, message)),
                 session=session,
             )
             lesson = result.saved_lesson.path.read_text(encoding="utf-8")

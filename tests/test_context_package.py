@@ -61,11 +61,13 @@ class ContextPackageTests(unittest.TestCase):
         self.assertEqual(package.timeline_block_count, 1)
         self.assertEqual(package.slide_count, 2)
         self.assertEqual(package.screen_note_count, 2)
+        self.assertIn("lesson.md", prompt)
         self.assertIn("00:00:01 — 00:00:20", markdown)
         self.assertIn("First explanation. Second explanation.", markdown)
-        self.assertEqual(markdown.count("Diagram A"), 1)
-        self.assertIn("создания lesson.md", prompt)
-        self.assertEqual(payload["lecture"]["meeting_id"], "meeting-context")
+        self.assertEqual(payload["lecture"]["title"], "Context lecture")
+        self.assertNotIn("meeting_id", payload["lecture"])
+        self.assertNotIn("source_url", payload["lecture"])
+        self.assertNotIn("meeting-context", markdown)
         self.assertEqual(progress_updates[-1][0], 100)
 
     def test_requires_a_prepared_transcript(self) -> None:

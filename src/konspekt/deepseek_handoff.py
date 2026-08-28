@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import os
 import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
+from .atomic_io import AtomicIOError, atomic_write_text
 from .bbb_import import BBBRecording
 from .local_pipeline import default_lecture_directory
-
+from .outbound_context import OutboundContextError, _validate_outbound_text
+from .platform_services import PlatformKeyboardConventions, PlatformSystemActions
 
 DEEPSEEK_URL = "https://chat.deepseek.com/"
 
@@ -43,11 +44,25 @@ def prepare_deepseek_handoff(
             "Сначала собери пакет контекста: не найдены " + ", ".join(missing) + "."
         )
 
+    try:
+        context_text = context_path.read_text(encoding="utf-8")
+        _validate_outbound_text(
+            "deepseek_context",
+            context_text,
+            (recording.meeting_id, recording.source_url),
+        )
+    except OutboundContextError as exc:
+        raise DeepSeekHandoffError(f"Ошибка проверки безопасности файлов передачи: {exc}") from exc
+    except OSError as exc:
+        raise DeepSeekHandoffError("Не удалось прочитать пакет контекста.") from exc
+
+    instructions_text = _render_handoff_instructions(recording.title)
     instructions_path = target / "deepseek-handoff.md"
-    instructions_path.write_text(
-        _render_handoff_instructions(recording.title),
-        encoding="utf-8",
-    )
+    try:
+        atomic_write_text(instructions_path, instructions_text, encoding="utf-8")
+    except (AtomicIOError, OSError) as exc:
+        raise DeepSeekHandoffError(f"Не удалось записать файл инструкций handoff: {exc}") from exc
+
     return DeepSeekHandoff(
         directory=target,
         context_path=context_path,
@@ -79,13 +94,11 @@ def launch_deepseek_handoff(
 
 
 def _open_in_file_manager(directory: Path) -> None:
-    if os.name == "nt":
-        os.startfile(str(directory))
-        return
-    webbrowser.open_new_tab(directory.resolve().as_uri())
+    PlatformSystemActions().open_in_file_manager(directory)
 
 
 def _render_handoff_instructions(title: str) -> str:
+    shortcut = PlatformKeyboardConventions().format_shortcut("V")
     return f"""# Передача лекции в DeepSeek Web
 
 Лекция: **{title}**
@@ -94,7 +107,7 @@ def _render_handoff_instructions(title: str) -> str:
 
 1. В DeepSeek выбери новый или подходящий существующий чат.
 2. Прикрепи файл lesson-context.md из этой папки.
-3. Вставь подготовленную инструкцию сочетанием Ctrl+V.
+3. Вставь подготовленную инструкцию сочетанием {shortcut}.
 4. Не включай веб-поиск: итоговый конспект должен опираться на приложенный контекст лекции.
 5. Проверь, что прикреплён именно файл контекста этой лекции, и отправь сообщение.
 6. Сохрани ответ DeepSeek как lesson.md в этой же папке.

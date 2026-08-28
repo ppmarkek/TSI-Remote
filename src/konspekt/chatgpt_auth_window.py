@@ -2,52 +2,37 @@
 
 from __future__ import annotations
 
-import os
-from typing import Any, Sequence
-from urllib.parse import urlsplit
+from collections.abc import Sequence
+from typing import Any
 
+from .platform_services import (
+    BrowserAuthError,
+    run_platform_auth_window,
+    validate_auth_url,
+)
 
 AUTH_URL_ENV = "KONSPEKT_CHATGPT_AUTH_URL"
-_ALLOWED_AUTH_HOSTS = {"auth.openai.com", "chatgpt.com"}
 
 
 class ChatGPTAuthWindowError(RuntimeError):
     """The internal authentication window could not be opened safely."""
 
 
-def run_auth_window(auth_url: str | None = None, *, webview_module: Any = None) -> None:
+def run_auth_window(
+    auth_url: str | None = None,
+    *,
+    webview_module: Any = None,
+    system: str | None = None,
+) -> None:
     """Display the OAuth page without exposing browser state to Konspekt."""
-
-    candidate = auth_url
-    if candidate is None:
-        candidate = os.environ.pop(AUTH_URL_ENV, "")
-    validated_url = _validated_auth_url(candidate)
-
-    if webview_module is None:
-        try:
-            import webview as webview_module
-        except ImportError as exc:
-            raise ChatGPTAuthWindowError(
-                "The embedded authentication window is unavailable."
-            ) from exc
-
     try:
-        webview_module.create_window(
-            "Вход в ChatGPT",
-            validated_url,
-            width=760,
-            height=860,
-            min_size=(560, 640),
+        run_platform_auth_window(
+            auth_url=auth_url,
+            system=system,
+            webview_module=webview_module,
         )
-        webview_module.start(
-            gui="edgechromium",
-            debug=False,
-            private_mode=True,
-        )
-    except Exception as exc:
-        raise ChatGPTAuthWindowError(
-            "The embedded authentication window could not be opened."
-        ) from exc
+    except BrowserAuthError as exc:
+        raise ChatGPTAuthWindowError(str(exc)) from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -61,19 +46,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _validated_auth_url(value: str | None) -> str:
-    candidate = str(value or "").strip()
     try:
-        parsed = urlsplit(candidate)
-        port = parsed.port
-    except ValueError as exc:
-        raise ChatGPTAuthWindowError("Invalid authentication URL.") from exc
-    hostname = parsed.hostname.casefold() if parsed.hostname else None
-    if (
-        parsed.scheme.casefold() != "https"
-        or hostname not in _ALLOWED_AUTH_HOSTS
-        or parsed.username is not None
-        or parsed.password is not None
-        or port not in {None, 443}
-    ):
-        raise ChatGPTAuthWindowError("Untrusted authentication URL.")
-    return candidate
+        return validate_auth_url(value)
+    except BrowserAuthError as exc:
+        raise ChatGPTAuthWindowError(str(exc)) from exc

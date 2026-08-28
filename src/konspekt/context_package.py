@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from .atomic_io import AtomicIOError, atomic_write_json, atomic_write_text
 from .bbb_import import BBBRecording, SlideInfo
 from .local_pipeline import ScreenNote, TranscriptSegment, default_lecture_directory
+from .outbound_context import (
+    OutboundContext,
+    OutboundContextError,
+    build_outbound_context,
+)
 
 
 class ContextPackageError(RuntimeError):
@@ -34,6 +41,7 @@ class ContextPackage:
     timeline_block_count: int
     slide_count: int
     screen_note_count: int
+    outbound_context: OutboundContext | None = None
 
 
 def context_package_is_ready(recording: BBBRecording) -> bool:
@@ -77,31 +85,43 @@ def build_context_package(
     slides = _unique_slides(recording.slides)
     screen_notes = _read_screen_notes(target / "screen-notes.json")
 
-    payload = {
-        "schema_version": 1,
-        "lecture": {
-            "title": recording.title,
-            "meeting_id": recording.meeting_id,
-            "source_url": recording.source_url,
-        },
-        "slides": [asdict(slide) for slide in slides],
-        "screen_notes": [asdict(note) for note in screen_notes],
-        "transcript_blocks": [asdict(block) for block in blocks],
-    }
+    try:
+        outbound = build_outbound_context(
+            recording.title,
+            slides=slides,
+            screen_notes=screen_notes,
+            transcript_blocks=blocks,
+            meeting_id=recording.meeting_id,
+            source_url=recording.source_url,
+        )
+    except OutboundContextError as exc:
+        raise ContextPackageError(f"Ошибка формирования безопасного контекста: {exc}") from exc
 
     json_path = target / "lesson-context.json"
     markdown_path = target / "lesson-context.md"
     prompt_path = target / "lesson-prompt.md"
     notify(78, "Создаём Markdown и структурированные данные…")
-    json_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    markdown_path.write_text(
-        _render_context_markdown(recording, slides, screen_notes, blocks),
-        encoding="utf-8",
-    )
-    prompt_path.write_text(_render_lesson_prompt(recording.title), encoding="utf-8")
+
+    try:
+        atomic_write_json(
+            json_path,
+            outbound.to_dict(),
+            ensure_ascii=False,
+            indent=2,
+        )
+        atomic_write_text(
+            markdown_path,
+            outbound.render_markdown(),
+            encoding="utf-8",
+        )
+        atomic_write_text(
+            prompt_path,
+            outbound.render_prompt(),
+            encoding="utf-8",
+        )
+    except (AtomicIOError, OSError) as exc:
+        raise ContextPackageError(f"Не удалось сохранить пакет контекста: {exc}") from exc
+
     notify(100, "Пакет контекста готов для прикрепления в чат.")
 
     return ContextPackage(
@@ -112,6 +132,7 @@ def build_context_package(
         timeline_block_count=len(blocks),
         slide_count=len(slides),
         screen_note_count=len(screen_notes),
+        outbound_context=outbound,
     )
 
 
@@ -227,85 +248,8 @@ def _group_transcript(
     return tuple(blocks)
 
 
-def _render_context_markdown(
-    recording: BBBRecording,
-    slides: tuple[SlideInfo, ...],
-    screen_notes: tuple[ScreenNote, ...],
-    blocks: tuple[TimelineBlock, ...],
-) -> str:
-    lines = [
-        f"# Контекст лекции: {recording.title}",
-        "",
-        "> Этот файл собран локально. Он не является готовым конспектом: передай его в выбранный чат вместе с `lesson-prompt.md`.",
-        "",
-        "## Источник",
-        f"- BBB-запись: {recording.source_url}",
-        f"- Идентификатор: `{recording.meeting_id}`",
-        "",
-        "## Текст со слайдов",
-        "",
-    ]
-    if slides:
-        for slide in slides:
-            label = slide.identifier.replace("_", " ")
-            lines.append(f"### {label}")
-            lines.append(slide.text or "Текст на слайде не извлечён.")
-            lines.append("")
-    else:
-        lines.extend(["Текст слайдов недоступен.", ""])
-
-    lines.extend(["## Текст на экране", ""])
-    if screen_notes:
-        for note in screen_notes:
-            lines.append(f"- **{_format_timestamp(note.timestamp_seconds)}** — {note.text}")
-        lines.append("")
-    else:
-        lines.extend(["OCR-заметки с экрана недоступны.", ""])
-
-    lines.extend(["## Транскрипция по времени", ""])
-    if blocks:
-        for block in blocks:
-            lines.append(
-                f"### {_format_timestamp(block.start_seconds)} — {_format_timestamp(block.end_seconds)}"
-            )
-            lines.extend([block.text, ""])
-    else:
-        lines.append("Речь в записи не была распознана.")
-
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _render_lesson_prompt(title: str) -> str:
-    return f"""# Инструкция для создания lesson.md
-
-Прикрепи в чат файл `lesson-context.md`, затем отправь текст ниже.
-
-```text
-На основе приложенного контекста подготовь один самодостаточный Markdown-файл `lesson.md` для студента.
-
-Тема лекции: «{title}».
-
-Требования:
-1. Пиши по-русски, но сохраняй важные термины на исходном языке и поясняй их.
-2. Используй только факты из контекста. Не придумывай определения, примеры, формулы или выводы. Неразборчивые места кратко помечай как «не удалось подтвердить по записи».
-3. Сделай ясную структуру: название, краткое резюме, цели обучения, основные разделы, ключевые понятия, связь со слайдами/демонстрацией, мини-словарь, вопросы для самопроверки и короткий план повторения.
-4. Объединяй транскрипцию со слайдами и текстом экрана: слайды задают структуру, а речь добавляет объяснения и примеры.
-5. Для ключевых утверждений указывай время из транскрипции в формате `[ЧЧ:ММ:СС]`, когда оно есть.
-6. Используй Markdown с понятными заголовками, короткими абзацами, списками и таблицами только там, где они действительно упрощают учёбу.
-7. Верни только содержимое готового `lesson.md`, без вступления о своей работе.
-```
-"""
-
-
 def _normalise_text(value: str) -> str:
     return " ".join(value.split())
-
-
-def _format_timestamp(seconds: float) -> str:
-    total = max(0, int(seconds))
-    minutes, second = divmod(total, 60)
-    hours, minute = divmod(minutes, 60)
-    return f"{hours:02d}:{minute:02d}:{second:02d}"
 
 
 def _do_nothing(_: int, __: str) -> None:

@@ -29,17 +29,26 @@ class FakeWebview:
 
 
 class ChatGPTAuthWindowTests(unittest.TestCase):
-    def test_opens_only_the_validated_url_in_private_edge_webview(self) -> None:
+    def test_opens_only_the_validated_url_in_private_edge_webview_on_windows(self) -> None:
         fake = FakeWebview()
         auth_url = "https://auth.openai.com/oauth/authorize?state=secret"
         with patch.dict(os.environ, {AUTH_URL_ENV: auth_url}, clear=False):
-            run_auth_window(webview_module=fake)
+            run_auth_window(webview_module=fake, system="win32")
             self.assertNotIn(AUTH_URL_ENV, os.environ)
 
         self.assertEqual(fake.window_args[1], auth_url)
         self.assertEqual(fake.start_kwargs["gui"], "edgechromium")
         self.assertEqual(fake.start_kwargs["private_mode"], True)
         self.assertEqual(fake.start_kwargs["debug"], False)
+
+    def test_opens_in_cocoa_wkwebview_on_macos(self) -> None:
+        fake = FakeWebview()
+        auth_url = "https://auth.openai.com/oauth/authorize?state=secret"
+        run_auth_window(auth_url=auth_url, webview_module=fake, system="darwin")
+
+        self.assertEqual(fake.window_args[1], auth_url)
+        self.assertEqual(fake.start_kwargs["gui"], "cocoa")
+        self.assertEqual(fake.start_kwargs["private_mode"], True)
 
     def test_rejects_lookalike_and_insecure_hosts(self) -> None:
         rejected = [
