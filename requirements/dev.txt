@@ -1,3 +1,4 @@
 -r base.txt
 pyinstaller>=6.0.0
 pillow>=10.0.0
+ruff>=0.5.0

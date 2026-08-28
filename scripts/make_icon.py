@@ -15,7 +15,9 @@ FOLD = "#CDE4D6"
 FOLD_LINE = "#A4CEB4"
 
 
-def _rounded(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], radius: int, fill: str) -> None:
+def _rounded(
+    draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], radius: int, fill: str
+) -> None:
     draw.rounded_rectangle(box, radius=radius, fill=fill)
 
 
