@@ -9,12 +9,11 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import Protocol
 from urllib.parse import urlparse
-
-import requests
 
 from .bbb_download import resolve_ffmpeg
 from .bbb_import import (
@@ -24,6 +23,7 @@ from .bbb_import import (
     load_library,
     recording_identity,
 )
+from .lecture_manifest import ALGORITHM_VERSION, LectureManifest, file_sha256
 
 
 class LocalProcessingError(RuntimeError):
@@ -66,14 +66,28 @@ class LocalTranscriber(Protocol):
     ) -> Iterable[TranscriptSegment]: ...
 
 
-def default_lecture_directory(recording: BBBRecording) -> Path:
-    base = default_library_path().parent / "lectures"
+def default_lecture_directory(
+    recording: BBBRecording,
+    base_dir: Path | None = None,
+) -> Path:
+    base = (
+        (base_dir / "lectures")
+        if base_dir is not None
+        else (default_library_path().parent / "lectures")
+    )
     meeting_id = recording.meeting_id.strip()
     if re.fullmatch(r"[A-Za-z0-9_-]{1,200}", meeting_id):
         directory_name = meeting_id
+        lib_path = (
+            (base_dir / "library.json")
+            if (base_dir is not None and (base_dir / "library.json").is_file())
+            else None
+        )
         try:
             same_id = [
-                item for item in load_library() if item.meeting_id == recording.meeting_id
+                item
+                for item in load_library(path=lib_path)
+                if item.meeting_id == recording.meeting_id
             ]
         except BBBImportError:
             same_id = []
@@ -87,9 +101,9 @@ def default_lecture_directory(recording: BBBRecording) -> Path:
             ).hexdigest()[:12]
             directory_name = f"{meeting_id[:80]}-{digest}"
     else:
-        digest = hashlib.sha256(
-            repr(recording_identity(recording)).encode("utf-8")
-        ).hexdigest()[:24]
+        digest = hashlib.sha256(repr(recording_identity(recording)).encode("utf-8")).hexdigest()[
+            :24
+        ]
         directory_name = f"lecture-{digest}"
     target = base / directory_name
     try:
@@ -101,9 +115,7 @@ def default_lecture_directory(recording: BBBRecording) -> Path:
 
 def lecture_is_prepared(recording: BBBRecording) -> bool:
     directory = default_lecture_directory(recording)
-    return (directory / "transcript.md").is_file() and (
-        directory / "transcript.json"
-    ).is_file()
+    return (directory / "transcript.md").is_file() and (directory / "transcript.json").is_file()
 
 
 def prepare_lecture(
@@ -156,9 +168,32 @@ def prepare_lecture(
         _extract_audio(ffmpeg, webcam_path, audio_path, command_runner)
     notify(36, "Аудио подготовлено.")
 
+    manifest = LectureManifest.for_recording(
+        recording.title,
+        recording.meeting_id,
+        recording.source_url,
+        target,
+    )
+    manifest_path = target / "lecture-manifest.json"
+
     transcript_path = target / "transcript.md"
     transcript_json_path = target / "transcript.json"
+    transcription_fp = {
+        "whisper_model": model_name,
+        "language": language or "auto",
+        "algorithm_version": ALGORITHM_VERSION,
+    }
+
+    can_reuse_transcript = False
     if transcript_path.is_file() and transcript_json_path.is_file():
+        if manifest_path.is_file():
+            can_reuse_transcript = manifest.is_stage_valid(
+                "transcription", transcription_fp, target
+            )
+        else:
+            can_reuse_transcript = True
+
+    if can_reuse_transcript:
         notify(66, "Используем уже готовую локальную транскрипцию.")
     else:
         notify(40, "Распознаём речь локальной моделью Whisper…")
@@ -180,10 +215,28 @@ def prepare_lecture(
             ) from exc
         notify(62, "Сохраняем транскрипцию…")
         _write_transcript(target, segments)
+        manifest.record_stage_success(
+            "transcription",
+            fingerprint=transcription_fp,
+            outputs={
+                "transcript.md": file_sha256(transcript_path),
+                "transcript.json": file_sha256(transcript_json_path),
+            },
+        )
+        try:
+            manifest.save(manifest_path)
+        except Exception:
+            pass
         notify(66, "Транскрипция готова.")
 
     screen_notes_path: Path | None = None
     frame_count = 0
+    ocr_fp = {
+        "frame_interval_seconds": frame_interval_seconds,
+        "enable_ocr": bool(enable_ocr),
+        "algorithm_version": ALGORITHM_VERSION,
+    }
+
     if recording.screen_video_url and not enable_ocr:
         existing_screen_notes = target / "screen-notes.json"
         if _screen_notes_cache_is_valid(existing_screen_notes):
@@ -237,7 +290,14 @@ def prepare_lecture(
             effective_frame_interval = 30
 
         existing_screen_notes = target / "screen-notes.json"
+        can_reuse_ocr = False
         if _screen_notes_cache_is_valid(existing_screen_notes):
+            if manifest_path.is_file():
+                can_reuse_ocr = manifest.is_stage_valid("ocr", ocr_fp, target)
+            else:
+                can_reuse_ocr = True
+
+        if can_reuse_ocr:
             screen_notes_path = existing_screen_notes
             notify(96, "Используем уже готовые заметки с экрана.")
         else:
@@ -259,6 +319,15 @@ def prepare_lecture(
                 encoding="utf-8",
             )
             temporary_notes_path.replace(screen_notes_path)
+            manifest.record_stage_success(
+                "ocr",
+                fingerprint=ocr_fp,
+                outputs={"screen-notes.json": file_sha256(screen_notes_path)},
+            )
+            try:
+                manifest.save(manifest_path)
+            except Exception:
+                pass
         elif enable_ocr and screen_notes_path is None:
             notify(96, "Кадры сохранены. OCR пропущен: Tesseract пока не установлен.")
 
@@ -278,57 +347,26 @@ def download_media(
     progress: DownloadProgressCallback | None = None,
 ) -> None:
     """Download one public BBB asset with bounded, local file handling."""
+    from .download_manager import DownloadError, download_file_resumable
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f"{destination.name}.part")
-    response: requests.Response | None = None
-    try:
+    def on_progress(percent: int, msg: str) -> None:
         if progress:
-            progress(f"Подключаемся к источнику файла {destination.name}…")
-        response = requests.get(url, stream=True, timeout=(15, 60))
-        response.raise_for_status()
-        total_header = response.headers.get("Content-Length")
-        try:
-            total_bytes = int(total_header) if total_header else 0
-        except (TypeError, ValueError):
-            total_bytes = 0
+            progress(msg)
 
-        downloaded = 0
-        next_report = 8 * 1024 * 1024
-        with temporary.open("wb") as output:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                output.write(chunk)
-                downloaded += len(chunk)
-                if progress and downloaded >= next_report:
-                    downloaded_mb = downloaded / (1024 * 1024)
-                    if total_bytes > 0:
-                        total_mb = total_bytes / (1024 * 1024)
-                        progress(
-                            f"Скачиваем {destination.name}: {downloaded_mb:.0f} из {total_mb:.0f} МБ…"
-                        )
-                    else:
-                        progress(f"Скачиваем {destination.name}: {downloaded_mb:.0f} МБ…")
-                    next_report = downloaded + 8 * 1024 * 1024
-
-        temporary.replace(destination)
-    except requests.RequestException as exc:
-        temporary.unlink(missing_ok=True)
+    try:
+        download_file_resumable(
+            url,
+            destination,
+            progress=on_progress,
+        )
+    except DownloadError as exc:
         raise LocalProcessingError(
             "Не удалось скачать один из файлов BBB-записи. Проверь подключение и повтори попытку."
         ) from exc
     except OSError as exc:
-        temporary.unlink(missing_ok=True)
         raise LocalProcessingError(
-            "Не удалось сохранить загруженный файл. Проверь свободное место и доступ к папке приложения."
+            "Не удалось сохранить скачанные материалы лекции на диск. Проверь права и свободное место."
         ) from exc
-    finally:
-        if response is not None:
-            response.close()
-
-    if progress:
-        progress(f"Файл сохранён: {destination.name}")
 
 
 def faster_whisper_transcribe(

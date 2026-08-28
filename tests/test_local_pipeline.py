@@ -266,12 +266,8 @@ class LocalPipelineTests(unittest.TestCase):
                     directory=target,
                     downloader=lambda *_: self.fail("download should not run"),
                     transcriber=lambda *_: self.fail("transcriber should not run"),
-                    command_runner=lambda *_args, **_kwargs: self.fail(
-                        "FFmpeg should not run"
-                    ),
-                    progress=lambda percent, message: progress_updates.append(
-                        (percent, message)
-                    ),
+                    command_runner=lambda *_args, **_kwargs: self.fail("FFmpeg should not run"),
+                    progress=lambda percent, message: progress_updates.append((percent, message)),
                 )
 
             transcript = prepared.transcript_path.read_text(encoding="utf-8")
@@ -321,12 +317,8 @@ class LocalPipelineTests(unittest.TestCase):
                     downloader=lambda *_: self.fail("download should not run"),
                     transcriber=lambda *_: self.fail("transcriber should not run"),
                     ocr_reader=read_frame,
-                    command_runner=lambda *_args, **_kwargs: self.fail(
-                        "FFmpeg should not run"
-                    ),
-                    progress=lambda percent, message: progress_updates.append(
-                        (percent, message)
-                    ),
+                    command_runner=lambda *_args, **_kwargs: self.fail("FFmpeg should not run"),
+                    progress=lambda percent, message: progress_updates.append((percent, message)),
                 )
 
             self.assertIsNotNone(prepared.screen_notes_path)
@@ -356,9 +348,7 @@ class LocalPipelineTests(unittest.TestCase):
             target = Path(temporary)
             (target / "webcams.webm").write_bytes(b"media")
 
-            def failing_ffmpeg(
-                command: list[str], **_: object
-            ) -> subprocess.CompletedProcess[str]:
+            def failing_ffmpeg(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
                 Path(command[-1]).write_bytes(b"partial")
                 return subprocess.CompletedProcess(command, 1, "", "failed")
 

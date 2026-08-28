@@ -16,7 +16,6 @@ from urllib.parse import parse_qs, urlparse
 import requests
 from tqdm import tqdm
 
-
 MEETING_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
 
 
@@ -68,13 +67,16 @@ def download_file(url: str, dest: Path) -> None:
     with requests.get(url, stream=True, timeout=60) as response:
         response.raise_for_status()
         total = int(response.headers.get("Content-Length", 0))
-        with open(dest, "wb") as handle, tqdm(
-            total=total or None,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=dest.name,
-        ) as progress:
+        with (
+            open(dest, "wb") as handle,
+            tqdm(
+                total=total or None,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=dest.name,
+            ) as progress,
+        ):
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     handle.write(chunk)
@@ -541,9 +543,7 @@ def process_recording(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    interactive = not args.once and (
-        getattr(sys, "frozen", False) or sys.stdin.isatty()
-    )
+    interactive = not args.once and (getattr(sys, "frozen", False) or sys.stdin.isatty())
 
     exit_code = 0
     url = args.url
