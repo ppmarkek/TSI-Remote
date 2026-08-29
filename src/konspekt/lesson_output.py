@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .atomic_io import AtomicIOError, atomic_write_text
 from .bbb_import import BBBRecording
 from .local_pipeline import default_lecture_directory
 
@@ -43,8 +44,11 @@ def save_generated_lesson(
         raise LessonOutputError("Вставь полный ответ из чата перед сохранением.")
 
     path = lesson_path(recording, directory=directory)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(cleaned + "\n", encoding="utf-8")
+    try:
+        atomic_write_text(path, cleaned + "\n", encoding="utf-8")
+    except (AtomicIOError, OSError) as exc:
+        raise LessonOutputError(f"Не удалось сохранить файл lesson.md: {exc}") from exc
+
     return SavedLesson(
         directory=path.parent,
         path=path,
@@ -67,3 +71,16 @@ def read_generated_lesson(
     if not content:
         raise LessonOutputError("Файл lesson.md пустой.")
     return content
+
+
+def save_lesson_markdown(directory: Path, markdown: str) -> Path:
+    """Save markdown text directly to lesson.md in the target directory."""
+    cleaned = markdown.replace("\r\n", "\n").strip()
+    if not cleaned:
+        raise LessonOutputError("Конспект не может быть пустым.")
+    target = directory / "lesson.md"
+    try:
+        atomic_write_text(target, cleaned + "\n", encoding="utf-8")
+    except (AtomicIOError, OSError) as exc:
+        raise LessonOutputError(f"Не удалось сохранить файл lesson.md: {exc}") from exc
+    return target

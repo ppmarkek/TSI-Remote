@@ -6,10 +6,11 @@ import os
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 from konspekt.bbb_import import BBBRecording
 from konspekt.chatgpt_account import (
@@ -268,9 +269,7 @@ class ChatGPTAccountTests(unittest.TestCase):
             server.calls[0],
             ("account/login/start", {"type": "chatgpt"}),
         )
-        start_helper.assert_called_once_with(
-            "https://auth.openai.com/oauth/authorize?state=secret"
-        )
+        start_helper.assert_called_once_with("https://auth.openai.com/oauth/authorize?state=secret")
         self.assertTrue(helper.terminated)
 
     def test_auth_url_is_not_put_on_helper_command_line(self) -> None:
@@ -394,12 +393,22 @@ class ChatGPTAccountTests(unittest.TestCase):
         progress: list[tuple[int, str]] = []
         captured: dict[str, Any] = {}
 
-        def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            captured["command"] = command
-            captured.update(kwargs)
-            output = Path(command[command.index("-o") + 1])
-            output.write_text("# Новый конспект", encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="ignored", stderr="ignored")
+        class FakePopen:
+            def __init__(self, command: list[str], **kwargs: Any) -> None:
+                captured["command"] = command
+                captured.update(kwargs)
+                self.returncode = 0
+                output = Path(command[command.index("-o") + 1])
+                output.write_text("# Новый конспект", encoding="utf-8")
+
+            def communicate(
+                self, input: str | None = None, timeout: float | None = None
+            ) -> tuple[str, str]:
+                captured["input"] = input
+                return "", ""
+
+            def poll(self) -> int | None:
+                return self.returncode
 
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -416,15 +425,13 @@ class ChatGPTAccountTests(unittest.TestCase):
                     "konspekt.chatgpt_account._codex_environment",
                     return_value={"CODEX_HOME": "private-home"},
                 ),
-                patch("konspekt.chatgpt_account.subprocess.run", side_effect=fake_run),
+                patch("konspekt.chatgpt_account.subprocess.Popen", side_effect=FakePopen),
             ):
                 result = generate_lesson_with_chatgpt(
                     self.recording,
                     "gpt-5.2-codex",
                     directory=directory,
-                    progress=lambda percent, message: progress.append(
-                        (percent, message)
-                    ),
+                    progress=lambda percent, message: progress.append((percent, message)),
                 )
             saved = (directory / "lesson.md").read_text(encoding="utf-8")
             temporary_outputs = list(directory.glob(".lesson-chatgpt-*.tmp"))
@@ -439,16 +446,12 @@ class ChatGPTAccountTests(unittest.TestCase):
         self.assertEqual(command[:2], ["codex.cmd", "exec"])
         self.assertIn("--ephemeral", command)
         config_values = [
-            command[index + 1]
-            for index, item in enumerate(command[:-1])
-            if item == "-c"
+            command[index + 1] for index, item in enumerate(command[:-1]) if item == "-c"
         ]
         self.assertIn('cli_auth_credentials_store="keyring"', config_values)
         self.assertIn('web_search="disabled"', config_values)
         disabled_features = [
-            command[index + 1]
-            for index, item in enumerate(command[:-1])
-            if item == "--disable"
+            command[index + 1] for index, item in enumerate(command[:-1]) if item == "--disable"
         ]
         self.assertEqual(
             disabled_features,
@@ -469,12 +472,22 @@ class ChatGPTAccountTests(unittest.TestCase):
     def test_generation_removes_bbb_source_details_from_stdin(self) -> None:
         captured_input = ""
 
-        def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            nonlocal captured_input
-            captured_input = kwargs["input"]
-            output = Path(command[command.index("-o") + 1])
-            output.write_text("# Lesson", encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0)
+        class FakePopen:
+            def __init__(self, command: list[str], **kwargs: Any) -> None:
+                self.command = command
+                self.returncode = 0
+                output = Path(command[command.index("-o") + 1])
+                output.write_text("# Lesson", encoding="utf-8")
+
+            def communicate(
+                self, input: str | None = None, timeout: float | None = None
+            ) -> tuple[str, str]:
+                nonlocal captured_input
+                captured_input = input or ""
+                return "", ""
+
+            def poll(self) -> int | None:
+                return self.returncode
 
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -494,7 +507,7 @@ class ChatGPTAccountTests(unittest.TestCase):
                     "konspekt.chatgpt_account._codex_environment",
                     return_value={"CODEX_HOME": "private-home"},
                 ),
-                patch("konspekt.chatgpt_account.subprocess.run", side_effect=fake_run),
+                patch("konspekt.chatgpt_account.subprocess.Popen", side_effect=FakePopen),
             ):
                 generate_lesson_with_chatgpt(
                     self.recording,
@@ -507,6 +520,16 @@ class ChatGPTAccountTests(unittest.TestCase):
         self.assertNotIn("private-meeting-id", captured_input)
 
     def test_failed_generation_preserves_existing_lesson(self) -> None:
+        class FailingPopen:
+            def __init__(self, *_: Any, **__: Any) -> None:
+                self.returncode = 1
+
+            def communicate(self, *_: Any, **__: Any) -> tuple[str, str]:
+                return "", ""
+
+            def poll(self) -> int | None:
+                return self.returncode
+
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             (directory / "lesson-prompt.md").write_text("Prompt", encoding="utf-8")
@@ -520,8 +543,8 @@ class ChatGPTAccountTests(unittest.TestCase):
                     return_value={"CODEX_HOME": "private-home"},
                 ),
                 patch(
-                    "konspekt.chatgpt_account.subprocess.run",
-                    return_value=subprocess.CompletedProcess([], 1),
+                    "konspekt.chatgpt_account.subprocess.Popen",
+                    side_effect=FailingPopen,
                 ),
             ):
                 with self.assertRaises(ChatGPTAccountError):
@@ -535,6 +558,60 @@ class ChatGPTAccountTests(unittest.TestCase):
 
         self.assertEqual(saved, "# Existing\n")
         self.assertEqual(temporary_outputs, [])
+
+    def test_queue_empty_and_timeout_normalize_to_chatgpt_account_error(self) -> None:
+        import queue
+
+        process = FakeWireProcess("")
+        session = _AppServerSession(process)  # type: ignore[arg-type]
+        session._messages.get = MagicMock(side_effect=queue.Empty)  # type: ignore[method-assign]
+
+        with self.assertRaises(ChatGPTAccountError) as exc_info:
+            session.request("test/timeout", {}, timeout=0.01)
+
+        self.assertIn("слишком долго не отвечает", str(exc_info.exception))
+
+    def test_unexpected_eof_and_stream_closed_normalizes_to_chatgpt_account_error(self) -> None:
+        process = FakeWireProcess("")
+        session = _AppServerSession(process)  # type: ignore[arg-type]
+        # Allow background thread to hit EOF and put _StreamClosed
+        import time
+
+        time.sleep(0.05)
+
+        with self.assertRaises(ChatGPTAccountError) as exc_info:
+            session.request("test/eof", {}, timeout=1.0)
+
+        self.assertIn("неожиданно завершил работу", str(exc_info.exception))
+
+    def test_app_server_error_response_normalizes_to_chatgpt_account_error(self) -> None:
+        wire = '{"id":0,"error":{"message":"custom error from codex"}}\n'
+        process = FakeWireProcess(wire)
+        session = _AppServerSession(process)  # type: ignore[arg-type]
+
+        with self.assertRaises(ChatGPTAccountError) as exc_info:
+            session.request("test/err", {}, timeout=1.0)
+
+        self.assertIn("custom error from codex", str(exc_info.exception))
+
+    def test_generation_respects_cancellation_token(self) -> None:
+        from konspekt.job_runner import CancellationToken, JobCancelledError
+
+        token = CancellationToken()
+        token.cancel()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "lesson-prompt.md").write_text("Prompt", encoding="utf-8")
+            (directory / "lesson-context.md").write_text("Context", encoding="utf-8")
+
+            with self.assertRaises(JobCancelledError):
+                generate_lesson_with_chatgpt(
+                    self.recording,
+                    "gpt-5.2-codex",
+                    directory=directory,
+                    cancellation_token=token,
+                )
 
 
 if __name__ == "__main__":

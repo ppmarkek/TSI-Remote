@@ -8,6 +8,7 @@ from unittest.mock import patch
 from konspekt.app import StudyApp
 from konspekt.bbb_import import BBBRecording
 from konspekt.chatgpt_account import (
+    ChatGPTAccountError,
     ChatGPTAccountStatus,
     ChatGPTGenerationResult,
     ChatGPTModel,
@@ -74,12 +75,8 @@ class DeferredChatGPTApp:
         self._chatgpt_account_operation_id = 4
         self.progress: list[tuple[int, str]] = []
         self.errors: list[str] = []
-        self.account_results: list[
-            tuple[ChatGPTAccountStatus, list[ChatGPTModel], str]
-        ] = []
-        self.generation_results: list[
-            tuple[BBBRecording, ChatGPTGenerationResult]
-        ] = []
+        self.account_results: list[tuple[ChatGPTAccountStatus, list[ChatGPTModel], str]] = []
+        self.generation_results: list[tuple[BBBRecording, ChatGPTGenerationResult]] = []
 
     def after(self, delay_ms: int, callback: Callable[[], None]) -> None:
         if delay_ms != 0:
@@ -153,6 +150,12 @@ class AccountRefreshApp:
 
     def _set_active_chatgpt_model(self, model: str) -> None:
         StudyApp._set_active_chatgpt_model(self, model)  # type: ignore[arg-type]
+
+    def after(self, delay_ms: int, callback: Callable[[], None]) -> None:
+        callback()
+
+    def _finish_chatgpt_account_error(self, operation_id: int, message: str) -> None:
+        StudyApp._finish_chatgpt_account_error(self, operation_id, message)  # type: ignore[arg-type]
 
 
 class StartLoginApp:
@@ -345,6 +348,54 @@ class AppWorkerTests(unittest.TestCase):
         self.assertEqual(app.account_results, [(signed_in, models, "")])
         self.assertEqual(app.generation_results, [(recording, generated)])
         self.assertEqual([percent for percent, _ in app.progress], [10, 20, 45, 52])
+
+    def test_chatgpt_account_worker_restores_state_on_error(self) -> None:
+        app = AccountRefreshApp()
+        app._chatgpt_account_operation_id = 10
+        app._chatgpt_login_active = True
+
+        with patch(
+            "konspekt.app.login_with_chatgpt",
+            side_effect=ChatGPTAccountError("Codex app-server слишком долго не отвечает."),
+        ):
+            StudyApp._chatgpt_account_worker(  # type: ignore[arg-type]
+                app,
+                should_login=True,
+                operation_id=10,
+            )
+
+        # Ensure callback executed and restored state
+        self.assertFalse(app._chatgpt_login_active)
+        self.assertIn("слишком долго не отвечает", app.status)
+
+    def test_chatgpt_generation_worker_restores_state_on_account_error(self) -> None:
+        recording = BBBRecording(
+            meeting_id="meeting-chatgpt-err",
+            source_url="https://example.test/playback?meetingId=meeting-chatgpt-err",
+            title="ChatGPT error lecture",
+            imported_at="2026-07-15T10:00:00+00:00",
+            audio_video_url="https://example.test/video/webcams.webm",
+            screen_video_url=None,
+            slides=(),
+        )
+        app = DeferredChatGPTApp()
+
+        with patch(
+            "konspekt.app.chatgpt_account_status",
+            side_effect=ChatGPTAccountError("Codex app-server неожиданно завершил работу."),
+        ):
+            StudyApp._chatgpt_generation_worker(  # type: ignore[arg-type]
+                app,
+                recording,
+                "gpt-5.5",
+                operation_id=7,
+                account_operation_id=4,
+            )
+
+        while app.callbacks:
+            app.callbacks.pop(0)()
+        self.assertEqual(len(app.errors), 1)
+        self.assertIn("неожиданно завершил работу", app.errors[0])
 
 
 if __name__ == "__main__":

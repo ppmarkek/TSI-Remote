@@ -13,6 +13,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return auth_window_main(arguments[1:])
 
+    if arguments and arguments[0] == "--diagnostics-json":
+        import json
+
+        from konspekt.diagnostics import collect_system_diagnostics
+
+        diag = collect_system_diagnostics()
+        sys.stdout.write(json.dumps(diag, ensure_ascii=False, indent=2) + "\n")
+        return 0
+
     from konspekt.app import main as app_main
 
     app_main()

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import unittest
-from datetime import timedelta, timezone as fixed_timezone
+from datetime import timedelta
+from datetime import timezone as fixed_timezone
 
-from konspekt import bbb_import
+from konspekt import library_manager
 
 
 class RecordingDateTests(unittest.TestCase):
     def test_formats_import_timestamp_in_the_requested_timezone(self) -> None:
-        formatted = bbb_import.format_imported_at(
+        formatted = library_manager.format_imported_at(
             "2026-07-15T10:00:00+00:00",
             timezone=fixed_timezone(timedelta(hours=3)),
         )
@@ -17,7 +18,7 @@ class RecordingDateTests(unittest.TestCase):
 
     def test_reports_unknown_date_instead_of_crashing(self) -> None:
         self.assertEqual(
-            bbb_import.format_imported_at("not-a-date"),
+            library_manager.format_imported_at("not-a-date"),
             "Дата добавления неизвестна",
         )
 

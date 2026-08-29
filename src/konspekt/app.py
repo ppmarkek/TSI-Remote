@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows interface for importing and preparing local lecture-study materials."""
+"""Quiet archive desktop interface for importing and preparing lecture materials."""
 
 from __future__ import annotations
 
@@ -19,10 +19,7 @@ from .api_generation import (
 from .bbb_import import (
     BBBImportError,
     BBBRecording,
-    format_imported_at,
     inspect_bbb_recording,
-    load_library,
-    save_to_library,
 )
 from .chatgpt_account import (
     ChatGPTAccountError,
@@ -40,19 +37,43 @@ from .context_package import (
     build_context_package,
     context_package_is_ready,
 )
+from .deepseek_handoff import (
+    DeepSeekHandoff,
+    DeepSeekHandoffError,
+    launch_deepseek_handoff,
+    prepare_deepseek_handoff,
+)
 from .diagnostics import record_exception
-from .local_pipeline import LocalProcessingError, lecture_is_prepared, prepare_lecture
+from .job_runner import CancellationToken, JobEvent, JobEventType, JobRunner
 from .lesson_output import (
     LessonOutputError,
     lesson_is_ready,
     read_generated_lesson,
     save_generated_lesson,
 )
-from .deepseek_handoff import (
-    DeepSeekHandoff,
-    DeepSeekHandoffError,
-    launch_deepseek_handoff,
-    prepare_deepseek_handoff,
+from .library_manager import (
+    calculate_library_size,
+    empty_trash,
+    filter_and_sort_recordings,
+    format_imported_at,
+    list_trash,
+    load_library,
+    move_to_trash,
+    rename_recording,
+    restore_from_trash,
+    save_to_library,
+)
+from .local_pipeline import (
+    LocalProcessingError,
+    default_lecture_directory,
+    lecture_is_prepared,
+    prepare_lecture,
+)
+from .markdown_reader import extract_table_of_contents, extract_timestamps
+from .outbound_context import (
+    OutboundContextError,
+    _validate_outbound_text,
+    validate_provider_context_limits,
 )
 from .settings import (
     AppSettings,
@@ -62,23 +83,27 @@ from .settings import (
     save_settings,
 )
 
-
 PALETTE = {
-    "canvas": "#FFFFFF",
-    "sidebar": "#F3F6F4",
+    "canvas": "#F6F7FB",
+    "sidebar": "#0F172A",
     "surface": "#FFFFFF",
-    "surface_soft": "#F7FAF8",
-    "ink": "#17211D",
-    "muted": "#55635C",
-    "faint": "#7B8981",
-    "line": "#DDE5E0",
-    "primary": "#176B45",
-    "primary_hover": "#105A39",
-    "primary_pressed": "#0B482D",
-    "primary_soft": "#E8F3EC",
-    "focus": "#0D7A4A",
-    "success": "#176B45",
-    "danger": "#A43D31",
+    "surface_soft": "#EEF2F7",
+    "ink": "#111827",
+    "muted": "#475569",
+    "faint": "#64748B",
+    "line": "#D7DDE7",
+    "primary": "#2F5BFF",
+    "primary_hover": "#2448CC",
+    "primary_pressed": "#1D3AA3",
+    "primary_soft": "#E8EDFF",
+    "focus": "#B45309",
+    "success": "#167052",
+    "danger": "#B4233C",
+    "sidebar_ink": "#F8FAFC",
+    "sidebar_muted": "#A7B2C3",
+    "sidebar_active": "#25324A",
+    "sidebar_hover": "#1E293B",
+    "sidebar_line": "#263248",
 }
 
 
@@ -137,19 +162,21 @@ class Typography:
     family: str
     title: tuple[str, int, str]
     heading: tuple[str, int, str]
+    subheading: tuple[str, int, str]
     body: tuple[str, int]
     body_bold: tuple[str, int, str]
+    secondary: tuple[str, int]
     small: tuple[str, int]
 
 
 class StudyApp(tk.Tk):
-    """A calm desktop shell for managing study lectures."""
+    """A focused desktop workspace for turning recordings into study material."""
 
     def __init__(self) -> None:
         super().__init__()
         self.title("Конспект — учебные материалы")
-        self.geometry("1180x760")
-        self.minsize(980, 660)
+        self.geometry("1240x780")
+        self.minsize(960, 660)
         self.configure(background=PALETTE["canvas"])
 
         self.type = self._create_typography()
@@ -160,8 +187,30 @@ class StudyApp(tk.Tk):
         self.style = ttk.Style(self)
         self._configure_styles()
         self._current_screen: ttk.Frame | None = None
-        self.settings, self._settings_load_warning = self._load_settings_safely()
+        from .platform_services import MigrationStatus, PlatformAppPaths, migrate_legacy_data
+
+        self.app_paths = PlatformAppPaths()
+        migration_warning = ""
+        try:
+            migration = migrate_legacy_data(self.app_paths)
+            if migration.status in {MigrationStatus.CONFLICT, MigrationStatus.ERROR}:
+                migration_warning = migration.error_message or (
+                    "Не удалось безопасно перенести старые данные."
+                )
+        except Exception as exc:
+            migration_warning = "Не удалось проверить перенос старых данных."
+            record_exception("migration.startup", exc)
+        self.settings, settings_warning = self._load_settings_safely()
+        self._settings_load_warning = " ".join(
+            item for item in (migration_warning, settings_warning) if item
+        )
         self.library: list[BBBRecording] = self._load_library_safely()
+        self._library_query = tk.StringVar()
+        self._library_state_filter = tk.StringVar(value="Все состояния")
+        self._library_date_filter = tk.StringVar(value="Все даты")
+        self._library_sort = tk.StringVar(value="Сначала новые")
+        self._library_storage_status = tk.StringVar()
+        self._reading_positions: dict[str, float] = {}
         self._bbb_url = tk.StringVar()
         self._import_status = tk.StringVar()
         self._import_button: ttk.Button | None = None
@@ -182,6 +231,9 @@ class StudyApp(tk.Tk):
         self._processing_heartbeat_id = 0
         self._processing_operation_id = 0
         self._processing_diagnostic_path: Path | None = None
+        self._job_runner = JobRunner()
+        self._processing_token: CancellationToken | None = None
+        self._processing_cancel_button: ttk.Button | None = None
         self._active_processing_recording: BBBRecording | None = None
         self._active_processing_kind: str | None = None
         self._handoff_status = tk.StringVar()
@@ -192,9 +244,7 @@ class StudyApp(tk.Tk):
         self._settings_provider = tk.StringVar(value=self.settings.api_provider)
         self._settings_api_key = tk.StringVar(value=self.settings.api_key)
         self._settings_api_model = tk.StringVar(value=self.settings.api_model)
-        self._settings_chatgpt_model = tk.StringVar(
-            value=self.settings.chatgpt_model
-        )
+        self._settings_chatgpt_model = tk.StringVar(value=self.settings.chatgpt_model)
         self._settings_whisper_model = tk.StringVar(value=self.settings.whisper_model)
         self._settings_frame_interval = tk.StringVar(
             value=str(self.settings.frame_interval_seconds)
@@ -203,9 +253,7 @@ class StudyApp(tk.Tk):
         self._settings_status = tk.StringVar(value=self._settings_load_warning)
         self._settings_status_label: tk.Label | None = None
         self._chatgpt_status = tk.StringVar(value="Проверяем состояние входа…")
-        self._chatgpt_generation_action = tk.StringVar(
-            value="Создать через ChatGPT"
-        )
+        self._chatgpt_generation_action = tk.StringVar(value="Создать через ChatGPT")
         self._chatgpt_model_summary = tk.StringVar(
             value=(
                 "API-ключ не нужен; используется лимит Codex твоего тарифа. "
@@ -222,6 +270,12 @@ class StudyApp(tk.Tk):
 
         self._build_shell()
         self.show_library(animated=False)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        """Cancel active work and wait briefly before closing the Tk shell."""
+        self._job_runner.shutdown(timeout_seconds=3.0)
+        self.destroy()
 
     @staticmethod
     def _load_app_icon() -> tk.PhotoImage | None:
@@ -231,21 +285,41 @@ class StudyApp(tk.Tk):
             return None
 
     def _create_typography(self) -> Typography:
-        preferred = "Segoe UI Variable"
+        from .platform_services import PlatformAppearancePreferences
+
         available = set(font.families())
-        family = preferred if preferred in available else "Segoe UI"
+        pref = PlatformAppearancePreferences().font_family_body
+        if sys.platform == "darwin" and "Helvetica Neue" in available:
+            family = "Helvetica Neue"
+        elif "Segoe UI Variable Text" in available:
+            family = "Segoe UI Variable Text"
+        elif "Segoe UI Variable" in available:
+            family = "Segoe UI Variable"
+        elif pref in available:
+            family = pref
+        elif "Helvetica Neue" in available:
+            family = "Helvetica Neue"
+        elif "Segoe UI" in available:
+            family = "Segoe UI"
+        elif "Arial" in available:
+            family = "Arial"
+        else:
+            family = "TkDefaultFont"
         return Typography(
             family=family,
-            title=(family, 27, "bold"),
-            heading=(family, 18, "bold"),
+            title=(family, 24, "bold"),
+            heading=(family, 15, "bold"),
+            subheading=(family, 11, "bold"),
             body=(family, 11),
             body_bold=(family, 11, "bold"),
-            small=(family, 9),
+            secondary=(family, 10),
+            small=(family, 10),
         )
 
     def _configure_styles(self) -> None:
         self.style.theme_use("clam")
         self.style.configure("TFrame", background=PALETTE["canvas"])
+
         self.style.configure(
             "Primary.TButton",
             background=PALETTE["primary"],
@@ -253,48 +327,106 @@ class StudyApp(tk.Tk):
             borderwidth=0,
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            padding=(18, 11),
+            padding=(17, 10),
         )
         self.style.map(
             "Primary.TButton",
             background=[
-                ("disabled", "#E1E9E4"),
+                ("disabled", "#C7D0E4"),
                 ("pressed", PALETTE["primary_pressed"]),
                 ("active", PALETTE["primary_hover"]),
             ],
-            foreground=[("disabled", "#C8D9CF")],
+            foreground=[("disabled", "#66728A")],
         )
+
         self.style.configure(
             "Secondary.TButton",
             background=PALETTE["surface"],
             foreground=PALETTE["ink"],
             borderwidth=1,
             relief="solid",
+            bordercolor=PALETTE["line"],
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            padding=(16, 10),
+            padding=(14, 8),
         )
         self.style.map(
             "Secondary.TButton",
             background=[
-                ("disabled", "#F4F7F5"),
+                ("disabled", PALETTE["canvas"]),
                 ("active", PALETTE["surface_soft"]),
             ],
             foreground=[("disabled", PALETTE["faint"])],
+            bordercolor=[("disabled", PALETTE["line"])],
         )
+
+        self.style.configure(
+            "Link.TButton",
+            background=PALETTE["surface"],
+            foreground=PALETTE["primary_pressed"],
+            borderwidth=0,
+            focuscolor=PALETTE["focus"],
+            font=self.type.small,
+            padding=(7, 5),
+        )
+        self.style.map(
+            "Link.TButton",
+            background=[("active", PALETTE["primary_soft"])],
+            foreground=[("active", PALETTE["primary_pressed"])],
+        )
+        self.style.configure(
+            "DangerLink.TButton",
+            background=PALETTE["surface"],
+            foreground=PALETTE["danger"],
+            borderwidth=0,
+            focuscolor=PALETTE["focus"],
+            font=self.type.small,
+            padding=(7, 5),
+        )
+        self.style.map(
+            "DangerLink.TButton",
+            background=[("active", "#FCECEF")],
+            foreground=[("active", PALETTE["danger"])],
+        )
+
         self.style.configure(
             "Nav.TButton",
             background=PALETTE["sidebar"],
-            foreground=PALETTE["ink"],
+            foreground=PALETTE["sidebar_ink"],
             borderwidth=0,
-            font=self.type.body_bold,
-            anchor="w",
+            font=self.type.body,
+            anchor="center",
             padding=(14, 10),
         )
         self.style.map(
             "Nav.TButton",
-            background=[("active", PALETTE["primary_soft"])],
+            background=[
+                ("selected", PALETTE["sidebar_active"]),
+                ("active", PALETTE["sidebar_hover"]),
+            ],
+            foreground=[("active", "#FFFFFF"), ("disabled", PALETTE["sidebar_muted"])],
         )
+
+        self.style.configure(
+            "SidebarPrimary.TButton",
+            background=PALETTE["primary"],
+            foreground="#FFFFFF",
+            borderwidth=0,
+            focuscolor=PALETTE["focus"],
+            font=self.type.body_bold,
+            anchor="center",
+            padding=(16, 10),
+        )
+        self.style.map(
+            "SidebarPrimary.TButton",
+            background=[
+                ("disabled", "#334155"),
+                ("pressed", PALETTE["primary_pressed"]),
+                ("active", PALETTE["primary_hover"]),
+            ],
+            foreground=[("disabled", PALETTE["sidebar_muted"])],
+        )
+
         self.style.configure(
             "Source.TEntry",
             fieldbackground=PALETTE["surface"],
@@ -303,77 +435,83 @@ class StudyApp(tk.Tk):
             lightcolor=PALETTE["line"],
             darkcolor=PALETTE["line"],
             insertcolor=PALETTE["ink"],
-            padding=(12, 10),
+            padding=(10, 8),
             font=self.type.body,
         )
         self.style.map(
             "Source.TEntry",
-            bordercolor=[("focus", PALETTE["focus"])],
-            lightcolor=[("focus", PALETTE["focus"])],
-            darkcolor=[("focus", PALETTE["focus"])],
+            bordercolor=[("focus", PALETTE["primary"])],
+            lightcolor=[("focus", PALETTE["primary"])],
+            darkcolor=[("focus", PALETTE["primary"])],
         )
+
         self.style.configure(
             "Processing.Horizontal.TProgressbar",
-            troughcolor="#DCE8E0",
+            troughcolor=PALETTE["primary_soft"],
             background=PALETTE["primary"],
             lightcolor=PALETTE["primary"],
             darkcolor=PALETTE["primary"],
-            bordercolor="#DCE8E0",
-            thickness=9,
+            bordercolor=PALETTE["line"],
+            thickness=7,
         )
         self.style.configure(
             "Error.Horizontal.TProgressbar",
-            troughcolor="#F2DEDA",
+            troughcolor="#FADBD8",
             background=PALETTE["danger"],
             lightcolor=PALETTE["danger"],
             darkcolor=PALETTE["danger"],
-            bordercolor="#F2DEDA",
-            thickness=9,
+            bordercolor="#FADBD8",
+            thickness=7,
         )
+
         self.style.configure(
             "TRadiobutton",
-            background=PALETTE["canvas"],
+            background=PALETTE["surface_soft"],
             foreground=PALETTE["ink"],
             font=self.type.body,
+            focuscolor=PALETTE["focus"],
         )
         self.style.map(
             "TRadiobutton",
-            background=[("active", PALETTE["canvas"])],
+            background=[("active", PALETTE["surface_soft"])],
         )
+
         self.style.configure(
             "TCheckbutton",
             background=PALETTE["canvas"],
             foreground=PALETTE["ink"],
             font=self.type.body,
+            focuscolor=PALETTE["focus"],
         )
         self.style.map(
             "TCheckbutton",
             background=[("active", PALETTE["canvas"])],
         )
+
         self.style.configure(
             "Settings.TCombobox",
             fieldbackground=PALETTE["surface"],
             foreground=PALETTE["ink"],
-            padding=(10, 8),
+            padding=(8, 6),
             font=self.type.body,
         )
 
     def _build_shell(self) -> None:
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        sidebar = tk.Frame(
+        topbar = tk.Frame(
             self,
             background=PALETTE["sidebar"],
-            highlightbackground=PALETTE["line"],
+            highlightbackground=PALETTE["sidebar_line"],
             highlightthickness=1,
-            width=248,
+            height=72,
         )
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.grid_propagate(False)
+        topbar.grid(row=0, column=0, sticky="ew")
+        topbar.grid_propagate(False)
 
-        brand = tk.Frame(sidebar, background=PALETTE["sidebar"])
-        brand.pack(fill="x", padx=26, pady=(30, 36))
+        brand = tk.Frame(topbar, background=PALETTE["sidebar"])
+        brand.pack(side="left", padx=(24, 22), pady=16)
         if self._sidebar_icon is not None:
             tk.Label(
                 brand,
@@ -383,8 +521,8 @@ class StudyApp(tk.Tk):
         else:
             tk.Label(
                 brand,
-                text="K",
-                font=(self.type.family, 14, "bold"),
+                text="К",
+                font=(self.type.family, 11, "bold"),
                 foreground="#FFFFFF",
                 background=PALETTE["primary"],
                 width=2,
@@ -393,66 +531,59 @@ class StudyApp(tk.Tk):
         tk.Label(
             brand,
             text="Конспект",
-            font=(self.type.family, 16, "bold"),
-            foreground=PALETTE["ink"],
+            font=(self.type.family, 13, "bold"),
+            foreground=PALETTE["sidebar_ink"],
             background=PALETTE["sidebar"],
-        ).pack(side="left", padx=(10, 0), pady=(2, 0))
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Frame(
+            topbar,
+            background=PALETTE["sidebar_line"],
+            width=1,
+            height=28,
+        ).pack(side="left", pady=22)
 
         lectures_button = ttk.Button(
-            sidebar,
-            text="Лекции",
+            topbar,
+            text="Библиотека",
             style="Nav.TButton",
             command=self.show_library,
         )
-        lectures_button.pack(fill="x", padx=14)
+        lectures_button.pack(side="left", padx=(18, 4), pady=15)
         settings_button = ttk.Button(
-            sidebar,
+            topbar,
             text="Настройки",
             style="Nav.TButton",
             command=self.show_settings,
         )
-        settings_button.pack(fill="x", padx=14, pady=(4, 0))
-        self._navigation_buttons.extend((lectures_button, settings_button))
+        settings_button.pack(side="left", padx=4, pady=15)
 
-        footer = tk.Frame(sidebar, background=PALETTE["sidebar"])
-        footer.pack(side="bottom", fill="x", padx=26, pady=28)
-        tk.Label(
-            footer,
-            text="Данные хранятся\nна этом компьютере",
-            justify="left",
-            font=self.type.small,
-            foreground=PALETTE["muted"],
-            background=PALETTE["sidebar"],
-        ).pack(anchor="w")
+        new_lecture_btn = ttk.Button(
+            topbar,
+            text="Новая лекция",
+            style="SidebarPrimary.TButton",
+            command=self.show_new_lecture,
+        )
+        new_lecture_btn.pack(side="right", padx=(8, 24), pady=15)
+        system_button = ttk.Button(
+            topbar,
+            text="Проверить систему",
+            style="Nav.TButton",
+            command=self.show_system_check_dialog,
+        )
+        system_button.pack(side="right", padx=4, pady=15)
+        self._navigation_buttons.extend(
+            (new_lecture_btn, lectures_button, settings_button, system_button)
+        )
 
         workspace = tk.Frame(self, background=PALETTE["canvas"])
-        workspace.grid(row=0, column=1, sticky="nsew")
+        workspace.grid(row=1, column=0, sticky="nsew")
         workspace.grid_columnconfigure(0, weight=1)
-        workspace.grid_rowconfigure(1, weight=1)
+        workspace.grid_rowconfigure(0, weight=1)
         self.workspace = workspace
 
-        header = tk.Frame(workspace, background=PALETTE["canvas"], height=78)
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_propagate(False)
-        tk.Label(
-            header,
-            text="Учебные материалы",
-            font=self.type.body_bold,
-            foreground=PALETTE["ink"],
-            background=PALETTE["canvas"],
-        ).pack(side="left", padx=40, pady=28)
-        tk.Label(
-            header,
-            text="Обработка записи — локально",
-            font=self.type.small,
-            foreground=PALETTE["muted"],
-            background=PALETTE["primary_soft"],
-            padx=10,
-            pady=5,
-        ).pack(side="right", padx=40, pady=21)
-
         content = tk.Frame(workspace, background=PALETTE["canvas"])
-        content.grid(row=1, column=0, sticky="nsew")
+        content.grid(row=0, column=0, sticky="nsew")
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(0, weight=1)
         self.content = content
@@ -491,17 +622,27 @@ class StudyApp(tk.Tk):
 
     def show_settings(self) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 28, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
+        header_row = tk.Frame(screen, background=PALETTE["canvas"])
+        header_row.grid(row=0, column=0, sticky="ew")
+        header_row.grid_columnconfigure(0, weight=1)
+
         tk.Label(
-            screen,
+            header_row,
             text="Настройки",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            header_row,
+            text="Проверить систему",
+            style="Secondary.TButton",
+            command=self.show_system_check_dialog,
+        ).grid(row=0, column=1, sticky="e")
         tk.Label(
             screen,
             text=(
@@ -513,7 +654,7 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(8, 26))
+        ).grid(row=1, column=0, sticky="w", pady=(8, 24))
 
         viewport = tk.Frame(screen, background=PALETTE["canvas"])
         viewport.grid(row=2, column=0, sticky="nsew")
@@ -570,7 +711,7 @@ class StudyApp(tk.Tk):
         tk.Label(
             form,
             text="Создание конспекта через API",
-            font=self.type.body_bold,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, columnspan=2, sticky="w")
@@ -585,7 +726,7 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 18))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 16))
 
         tk.Label(
             form,
@@ -593,8 +734,8 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=2, column=0, sticky="w", padx=(0, 26), pady=8)
-        providers = tk.Frame(form, background=PALETTE["canvas"])
+        ).grid(row=2, column=0, sticky="w", padx=(0, 24), pady=8)
+        providers = tk.Frame(form, background=PALETTE["surface_soft"])
         providers.grid(row=2, column=1, sticky="w", pady=8)
         ttk.Radiobutton(
             providers,
@@ -602,14 +743,14 @@ class StudyApp(tk.Tk):
             value="openai",
             variable=self._settings_provider,
             command=self._settings_provider_changed,
-        ).pack(side="left")
+        ).pack(side="left", padx=8, pady=4)
         ttk.Radiobutton(
             providers,
             text="DeepSeek",
             value="deepseek",
             variable=self._settings_provider,
             command=self._settings_provider_changed,
-        ).pack(side="left", padx=(20, 0))
+        ).pack(side="left", padx=(16, 8), pady=4)
 
         tk.Label(
             form,
@@ -617,7 +758,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=3, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=3, column=0, sticky="w", padx=(0, 24), pady=8)
         api_key_entry = ttk.Entry(
             form,
             textvariable=self._settings_api_key,
@@ -632,7 +773,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=4, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=4, column=0, sticky="w", padx=(0, 24), pady=8)
         ttk.Entry(
             form,
             textvariable=self._settings_api_model,
@@ -644,12 +785,12 @@ class StudyApp(tk.Tk):
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=24,
+            pady=20,
         )
         tk.Label(
             form,
             text="Личный ChatGPT",
-            font=self.type.body_bold,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=6, column=0, columnspan=2, sticky="w")
@@ -664,7 +805,7 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 18))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 16))
 
         tk.Label(
             form,
@@ -672,7 +813,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=8, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=8, column=0, sticky="w", padx=(0, 24), pady=8)
         self._chatgpt_status_label = tk.Label(
             form,
             textvariable=self._chatgpt_status,
@@ -690,7 +831,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=9, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=9, column=0, sticky="w", padx=(0, 24), pady=8)
         self._chatgpt_model_combobox = ttk.Combobox(
             form,
             textvariable=self._settings_chatgpt_model,
@@ -702,9 +843,7 @@ class StudyApp(tk.Tk):
         self._chatgpt_model_combobox.grid(row=9, column=1, sticky="w", pady=8)
         self._chatgpt_model_combobox.bind(
             "<<ComboboxSelected>>",
-            lambda _: self._set_active_chatgpt_model(
-                self._settings_chatgpt_model.get()
-            ),
+            lambda _: self._set_active_chatgpt_model(self._settings_chatgpt_model.get()),
         )
 
         self._chatgpt_login_button = ttk.Button(
@@ -720,12 +859,12 @@ class StudyApp(tk.Tk):
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=24,
+            pady=20,
         )
         tk.Label(
             form,
             text="Локальная обработка записи",
-            font=self.type.body_bold,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=12, column=0, columnspan=2, sticky="w")
@@ -735,7 +874,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(6, 18))
+        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(6, 16))
 
         tk.Label(
             form,
@@ -743,7 +882,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=14, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=14, column=0, sticky="w", padx=(0, 24), pady=8)
         ttk.Combobox(
             form,
             textvariable=self._settings_whisper_model,
@@ -759,7 +898,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=15, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=15, column=0, sticky="w", padx=(0, 24), pady=8)
         interval = tk.Frame(form, background=PALETTE["canvas"])
         interval.grid(row=15, column=1, sticky="w", pady=8)
         ttk.Combobox(
@@ -785,7 +924,7 @@ class StudyApp(tk.Tk):
         ).grid(row=16, column=1, sticky="w", pady=(10, 0))
 
         actions = tk.Frame(settings_body, background=PALETTE["canvas"])
-        actions.grid(row=1, column=0, sticky="ew", pady=(28, 12))
+        actions.grid(row=1, column=0, sticky="ew", pady=(24, 12))
         ttk.Button(
             actions,
             text="Сохранить настройки",
@@ -796,9 +935,7 @@ class StudyApp(tk.Tk):
             actions,
             textvariable=self._settings_status,
             font=self.type.small,
-            foreground=(
-                PALETTE["danger"] if self._settings_load_warning else PALETTE["muted"]
-            ),
+            foreground=(PALETTE["danger"] if self._settings_load_warning else PALETTE["muted"]),
             background=PALETTE["canvas"],
             wraplength=560,
             justify="left",
@@ -847,12 +984,12 @@ class StudyApp(tk.Tk):
         self._settings_load_warning = ""
         if proposed.api_configured:
             message = (
-                f"Сохранено. API {proposed.provider_label} подключён; ключ защищён Windows."
+                f"Сохранено. API {proposed.provider_label} подключён; "
+                "ключ хранится в системном защищённом хранилище."
             )
         else:
             message = (
-                "Сохранено. API не подключён; личный ChatGPT и веб-чат DeepSeek "
-                "остаются доступны."
+                "Сохранено. API не подключён; личный ChatGPT и веб-чат DeepSeek остаются доступны."
             )
         self._set_settings_status(message, PALETTE["success"])
 
@@ -872,6 +1009,9 @@ class StudyApp(tk.Tk):
         operation_id = self._next_chatgpt_account_operation()
         self._set_chatgpt_status("Проверяем состояние входа…", PALETTE["muted"])
         self._set_chatgpt_controls_busy(True)
+        if hasattr(self, "_job_runner"):
+            self._start_chatgpt_account_job(False, operation_id)
+            return
         threading.Thread(
             target=self._chatgpt_account_worker,
             args=(False, operation_id),
@@ -888,11 +1028,47 @@ class StudyApp(tk.Tk):
             PALETTE["muted"],
         )
         self._set_chatgpt_controls_busy(True)
+        if hasattr(self, "_job_runner"):
+            self._start_chatgpt_account_job(True, operation_id)
+            return
         threading.Thread(
             target=self._chatgpt_account_worker,
             args=(True, operation_id),
             daemon=True,
         ).start()
+
+    def _start_chatgpt_account_job(self, should_login: bool, operation_id: int) -> None:
+        def task(
+            token: CancellationToken, _: object
+        ) -> tuple[ChatGPTAccountStatus, list[ChatGPTModel], str]:
+            token.check_cancelled()
+            status = login_with_chatgpt() if should_login else chatgpt_account_status()
+            models: list[ChatGPTModel] = []
+            model_error = ""
+            if status.signed_in:
+                try:
+                    models = list_chatgpt_models()
+                except ChatGPTAccountError as exc:
+                    model_error = str(exc)
+            return status, models, model_error
+
+        def event_handler(event: JobEvent) -> None:
+            def apply_event() -> None:
+                if operation_id != self._chatgpt_account_operation_id:
+                    return
+                if event.event_type is JobEventType.COMPLETED and isinstance(event.result, tuple):
+                    status, models, model_error = event.result
+                    self._finish_chatgpt_account_refresh(operation_id, status, models, model_error)
+                elif event.event_type is JobEventType.CANCELLED:
+                    self._finish_chatgpt_account_error(operation_id, "Операция отменена.")
+                elif event.event_type is JobEventType.FAILED:
+                    self._finish_chatgpt_account_error(
+                        operation_id, event.error or "Не удалось проверить вход."
+                    )
+
+            self.after(0, apply_event)
+
+        self._job_runner.run_job(task, event_handler)
 
     def _chatgpt_account_worker(
         self,
@@ -1017,7 +1193,7 @@ class StudyApp(tk.Tk):
 
     def show_library(self, animated: bool = True) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 28, 40, 40))
+        screen.configure(padding=(48, 36, 48, 40))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
@@ -1026,27 +1202,27 @@ class StudyApp(tk.Tk):
         intro.grid_columnconfigure(0, weight=1)
         tk.Label(
             intro,
-            text="Моя библиотека",
+            text="Библиотека лекций",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             intro,
-            text="Все записи, конспекты и материалы по лекциям будут собраны здесь.",
+            text="Записи, расшифровки и готовые конспекты — в одном рабочем списке.",
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Button(
             intro,
-            text="Новая лекция  →",
+            text="Добавить лекцию",
             style="Primary.TButton",
             command=self.show_new_lecture,
         ).grid(row=0, column=1, rowspan=2, sticky="e")
 
         divider = tk.Frame(screen, background=PALETTE["line"], height=1)
-        divider.grid(row=1, column=0, sticky="ew", pady=(32, 0))
+        divider.grid(row=1, column=0, sticky="ew", pady=(28, 0))
 
         if self.library:
             self._build_library_list(screen)
@@ -1061,62 +1237,203 @@ class StudyApp(tk.Tk):
         empty.grid_columnconfigure(0, weight=1)
         empty.grid_rowconfigure(0, weight=1)
 
-        message = tk.Frame(empty, background=PALETTE["canvas"])
-        message.grid(row=0, column=0)
-        icon = tk.Canvas(
-            message,
-            width=56,
-            height=56,
-            background=PALETTE["canvas"],
-            highlightthickness=0,
+        message = tk.Frame(
+            empty,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=36,
+            pady=32,
         )
-        icon.create_rectangle(
-            13,
-            10,
-            43,
-            46,
-            outline=PALETTE["primary"],
-            width=2,
-        )
-        icon.create_line(19, 21, 37, 21, fill=PALETTE["primary"], width=2)
-        icon.create_line(19, 28, 37, 28, fill=PALETTE["primary"], width=2)
-        icon.create_line(19, 35, 31, 35, fill=PALETTE["primary"], width=2)
-        icon.pack(pady=(0, 18))
+        message.grid(row=0, column=0, sticky="ew", pady=(28, 0))
+        message.grid_columnconfigure(0, weight=1)
+        message.grid_columnconfigure(1, weight=1)
         tk.Label(
             message,
-            text="Библиотека пока пуста",
+            text="Начни с первой лекции",
             font=self.type.heading,
             foreground=PALETTE["ink"],
-            background=PALETTE["canvas"],
-        ).pack()
+            background=PALETTE["surface"],
+        ).grid(row=0, column=0, sticky="w")
         tk.Label(
             message,
-            text="Добавь первую запись — здесь появится её конспект\nи все материалы для повторения.",
-            justify="center",
+            text=(
+                "Добавь запись BigBlueButton или файл с компьютера. "
+                "Материалы останутся локальными, а этапы подготовки будут видны в списке."
+            ),
+            justify="left",
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["canvas"],
-        ).pack(pady=(8, 20))
+            background=PALETTE["surface"],
+            wraplength=430,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 20), padx=(0, 40))
         ttk.Button(
             message,
             text="Добавить первую лекцию",
-            style="Secondary.TButton",
+            style="Primary.TButton",
             command=self.show_new_lecture,
-        ).pack()
+        ).grid(row=2, column=0, sticky="w")
+
+        steps = tk.Frame(message, background=PALETTE["surface"])
+        steps.grid(row=0, column=1, rowspan=3, sticky="nsew")
+        for index, (title, detail) in enumerate(
+            (
+                ("Добавь источник", "Ссылка BBB или локальный аудио- и видеофайл."),
+                ("Подготовь материалы", "Расшифровка и кадры обрабатываются на компьютере."),
+                ("Открой конспект", "Читай, ищи и переходи по таймкодам."),
+            ),
+            start=1,
+        ):
+            line = tk.Frame(steps, background=PALETTE["surface"])
+            line.pack(fill="x", pady=(0, 13 if index < 3 else 0))
+            tk.Label(
+                line,
+                text=str(index),
+                font=self.type.small,
+                foreground=PALETTE["primary_pressed"],
+                background=PALETTE["primary_soft"],
+                width=3,
+                pady=4,
+            ).pack(side="left", anchor="n")
+            copy = tk.Frame(line, background=PALETTE["surface"])
+            copy.pack(side="left", fill="x", expand=True, padx=(12, 0))
+            tk.Label(
+                copy,
+                text=title,
+                font=self.type.body_bold,
+                foreground=PALETTE["ink"],
+                background=PALETTE["surface"],
+            ).pack(anchor="w")
+            tk.Label(
+                copy,
+                text=detail,
+                font=self.type.small,
+                foreground=PALETTE["muted"],
+                background=PALETTE["surface"],
+                wraplength=350,
+                justify="left",
+            ).pack(anchor="w", pady=(2, 0))
 
     def _build_library_list(self, screen: ttk.Frame) -> None:
         listing = tk.Frame(screen, background=PALETTE["canvas"])
         listing.grid(row=2, column=0, sticky="nsew", pady=(22, 0))
         listing.grid_columnconfigure(0, weight=1)
-        listing.grid_rowconfigure(1, weight=1)
+        listing.grid_rowconfigure(2, weight=1)
+
+        toolbar = tk.Frame(listing, background=PALETTE["canvas"])
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+        toolbar.grid_columnconfigure(0, weight=1)
+        search = ttk.Entry(
+            toolbar, textvariable=self._library_query, width=34, style="Source.TEntry"
+        )
+        search.grid(row=0, column=0, columnspan=3, sticky="ew")
+        search.configure(takefocus=True)
+        search.bind("<Return>", lambda _: self.show_library(animated=False))
+        ttk.Button(
+            toolbar,
+            text="Найти",
+            style="Secondary.TButton",
+            command=lambda: self.show_library(animated=False),
+        ).grid(row=0, column=3, padx=(8, 0))
+        state_values = (
+            "Все состояния",
+            "Импортировано",
+            "Подготовлено",
+            "Пакет готов",
+            "Конспект готов",
+        )
+        state_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self._library_state_filter,
+            values=state_values,
+            state="readonly",
+            width=16,
+            style="Settings.TCombobox",
+        )
+        state_combo.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        state_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
+
+        date_values = ("Все даты", "Сегодня", "За 7 дней", "За 30 дней")
+        date_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self._library_date_filter,
+            values=date_values,
+            state="readonly",
+            width=12,
+            style="Settings.TCombobox",
+        )
+        date_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+        date_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
+
+        sort_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self._library_sort,
+            values=("Сначала новые", "Сначала старые", "По названию"),
+            state="readonly",
+            width=15,
+            style="Settings.TCombobox",
+        )
+        sort_combo.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
+        sort_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
+
+        ttk.Button(
+            toolbar,
+            text="Корзина",
+            style="Secondary.TButton",
+            command=self.show_trash_dialog,
+        ).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=(10, 0))
 
         tk.Label(
-            listing,
-            text=f"В библиотеке: {len(self.library)}",
+            toolbar,
+            textvariable=self._library_storage_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ).grid(row=0, column=4, padx=(14, 0))
+
+        def _calc_size_worker():
+            try:
+                sz = calculate_library_size(self.library, self.app_paths.data_dir)
+                self.after(
+                    0, lambda: self._library_storage_status.set(f"Занято: {self._format_bytes(sz)}")
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_calc_size_worker, daemon=True).start()
+
+        state_map = {
+            "Импортировано": "imported",
+            "Подготовлено": "prepared",
+            "Пакет готов": "package_ready",
+            "Конспект готов": "lesson_ready",
+        }
+        state_filter = state_map.get(self._library_state_filter.get())
+        date_map = {"Сегодня": "today", "За 7 дней": "7_days", "За 30 дней": "30_days"}
+        date_filter = date_map.get(self._library_date_filter.get())
+        from .workflow import LectureState
+
+        filtered = filter_and_sort_recordings(
+            self.library,
+            query=self._library_query.get(),
+            state_filter=LectureState(state_filter) if state_filter else None,
+            sort_by=(
+                "title_asc"
+                if self._library_sort.get() == "По названию"
+                else "date_asc"
+                if self._library_sort.get() == "Сначала старые"
+                else "date_desc"
+            ),
+            date_filter=date_filter,
+            base_dir=self.app_paths.data_dir,
+        )
+        tk.Label(
+            listing,
+            text=f"Показано: {len(filtered)} из {len(self.library)}",
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["canvas"],
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         canvas = tk.Canvas(
             listing,
@@ -1124,12 +1441,17 @@ class StudyApp(tk.Tk):
             highlightthickness=0,
             takefocus=True,
         )
-        canvas.grid(row=1, column=0, sticky="nsew")
+        canvas.grid(row=2, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(listing, orient="vertical", command=canvas.yview)
-        scrollbar.grid(row=1, column=1, sticky="ns", padx=(10, 0))
+        scrollbar.grid(row=2, column=1, sticky="ns", padx=(10, 0))
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        rows = tk.Frame(canvas, background=PALETTE["canvas"])
+        rows = tk.Frame(
+            canvas,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+        )
         rows.grid_columnconfigure(0, weight=1)
         rows_window = canvas.create_window((0, 0), window=rows, anchor="nw")
         rows.bind(
@@ -1148,92 +1470,381 @@ class StudyApp(tk.Tk):
         canvas.bind("<Home>", lambda _: canvas.yview_moveto(0.0))
         canvas.bind("<End>", lambda _: canvas.yview_moveto(1.0))
 
-        for index, recording in enumerate(self.library):
+        for index, recording in enumerate(filtered):
             row = tk.Frame(
                 rows,
-                background=PALETTE["surface_soft"],
-                highlightbackground=PALETTE["line"],
-                highlightthickness=1,
-                padx=18,
-                pady=15,
+                background=PALETTE["surface"],
+                padx=20,
+                pady=16,
             )
-            row.grid(row=index, column=0, sticky="ew", pady=(0, 8))
+            row.grid(row=index * 2, column=0, sticky="ew")
             row.grid_columnconfigure(0, weight=1)
             tk.Label(
                 row,
                 text=recording.title,
                 font=self.type.body_bold,
                 foreground=PALETTE["ink"],
-                background=PALETTE["surface_soft"],
-                wraplength=580,
+                background=PALETTE["surface"],
+                wraplength=560,
                 justify="left",
             ).grid(row=0, column=0, sticky="w")
-            tk.Label(
-                row,
-                text=format_imported_at(recording.imported_at),
-                font=self.type.small,
-                foreground=PALETTE["muted"],
-                background=PALETTE["surface_soft"],
-            ).grid(row=1, column=0, sticky="w", pady=(5, 0))
             tk.Label(
                 row,
                 text=self._recording_summary(recording),
                 font=self.type.small,
                 foreground=PALETTE["muted"],
-                background=PALETTE["surface_soft"],
-            ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+                background=PALETTE["surface"],
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
             prepared = lecture_is_prepared(recording)
             package_ready = prepared and context_package_is_ready(recording)
             lesson_ready = lesson_is_ready(recording)
+
             if lesson_ready:
                 status_text = "Конспект готов"
                 status_color = PALETTE["success"]
                 action_text = "Открыть конспект"
                 action_style = "Primary.TButton"
-                action = lambda item=recording: self.show_lesson_reader(item)
+
+                def on_action_reader(item=recording) -> None:
+                    self.show_lesson_reader(item)
+
+                action = on_action_reader
                 action_state = "normal"
             elif not prepared:
-                status_text = "Материалы ещё не подготовлены"
+                status_text = "Материалы не подготовлены"
                 status_color = PALETTE["muted"]
                 action_text = "Подготовить"
                 action_style = "Primary.TButton"
-                action = lambda item=recording: self.start_local_processing(item)
+
+                def on_action_prep(item=recording) -> None:
+                    self.start_local_processing(item)
+
+                action = on_action_prep
                 action_state = "normal"
             elif not package_ready:
                 status_text = "Транскрипция готова"
                 status_color = PALETTE["success"]
                 action_text = "Собрать пакет"
                 action_style = "Primary.TButton"
-                action = lambda item=recording: self.start_context_packaging(item)
+
+                def on_action_pkg(item=recording) -> None:
+                    self.start_context_packaging(item)
+
+                action = on_action_pkg
                 action_state = "normal"
             else:
-                status_text = "Готово к созданию конспекта"
+                status_text = "Готово к созданию"
                 status_color = PALETTE["success"]
                 action_text = "Создать конспект"
                 action_style = "Primary.TButton"
-                action = lambda item=recording: self.show_chat_provider_choice(item)
+
+                def on_action_choice(item=recording) -> None:
+                    self.show_chat_provider_choice(item)
+
+                action = on_action_choice
                 action_state = "normal"
+
+            right_meta = tk.Frame(row, background=PALETTE["surface"])
+            right_meta.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
             tk.Label(
-                row,
+                right_meta,
+                text=format_imported_at(recording.imported_at),
+                font=self.type.small,
+                foreground=PALETTE["faint"],
+                background=PALETTE["surface"],
+            ).pack(anchor="e")
+            tk.Label(
+                right_meta,
                 text=status_text,
                 font=self.type.small,
                 foreground=status_color,
-                background=PALETTE["surface_soft"],
-            ).grid(row=3, column=0, sticky="w", pady=(7, 0))
+                background=PALETTE["surface"],
+            ).pack(anchor="e", pady=(2, 0))
+
             ttk.Button(
                 row,
                 text=action_text,
                 style=action_style,
                 command=action,
                 state=action_state,
-            ).grid(row=0, column=1, rowspan=4, sticky="e", padx=(18, 0))
+            ).grid(row=0, column=2, rowspan=2, sticky="e", padx=(16, 0))
+
+            management = tk.Frame(row, background=PALETTE["surface"])
+            management.grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+            ttk.Button(
+                management,
+                text="Переименовать",
+                style="Link.TButton",
+                command=lambda item=recording: self._rename_library_recording(item),
+            ).pack(side="left")
+            ttk.Button(
+                management,
+                text="В корзину",
+                style="DangerLink.TButton",
+                command=lambda item=recording: self._trash_library_recording(item),
+            ).pack(side="left", padx=(6, 0))
+            ttk.Button(
+                management,
+                text="Открыть папку",
+                style="Link.TButton",
+                command=lambda item=recording: self._open_lecture_folder(item),
+            ).pack(side="left", padx=(6, 0))
+
+            if index < len(filtered) - 1:
+                tk.Frame(rows, background=PALETTE["line"], height=1).grid(
+                    row=index * 2 + 1,
+                    column=0,
+                    sticky="ew",
+                    padx=20,
+                )
 
         self._bind_mousewheel_tree(canvas, canvas)
+
+    @staticmethod
+    def _format_bytes(value: int) -> str:
+        size = float(max(0, value))
+        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if size < 1024 or unit == "ТБ":
+                return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
+            size /= 1024
+        return "0 Б"
+
+    def _open_lecture_folder(self, recording: BBBRecording) -> None:
+        from .platform_services import PlatformSystemActions
+
+        target = default_lecture_directory(recording, base_dir=self.app_paths.data_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        PlatformSystemActions().open_in_file_manager(target)
+
+    def show_trash_dialog(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Корзина лекций")
+        dialog.geometry("640x480")
+        dialog.minsize(500, 360)
+        dialog.configure(background=PALETTE["canvas"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        header = tk.Frame(dialog, background=PALETTE["canvas"], padx=24, pady=18)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Корзина удалённых лекций",
+            font=self.type.heading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["canvas"],
+        ).pack(anchor="w")
+
+        content_frame = tk.Frame(dialog, background=PALETTE["canvas"], padx=24)
+        content_frame.pack(fill="both", expand=True)
+
+        footer = tk.Frame(dialog, background=PALETTE["canvas"], padx=24, pady=16)
+        footer.pack(fill="x", side="bottom")
+
+        def refresh_trash() -> None:
+            for child in content_frame.winfo_children():
+                child.destroy()
+            items = list_trash(self.app_paths.data_dir)
+            if not items:
+                tk.Label(
+                    content_frame,
+                    text="Корзина пуста.",
+                    font=self.type.body,
+                    foreground=PALETTE["muted"],
+                    background=PALETTE["canvas"],
+                ).pack(pady=40)
+                empty_btn.configure(state="disabled")
+                return
+
+            empty_btn.configure(state="normal")
+            for item in items:
+                row = tk.Frame(
+                    content_frame,
+                    background=PALETTE["surface"],
+                    highlightbackground=PALETTE["line"],
+                    highlightthickness=1,
+                    padx=14,
+                    pady=10,
+                )
+                row.pack(fill="x", pady=4)
+                row.grid_columnconfigure(0, weight=1)
+                tk.Label(
+                    row,
+                    text=item.get("original_title", "Без названия"),
+                    font=self.type.body_bold,
+                    foreground=PALETTE["ink"],
+                    background=PALETTE["surface"],
+                    anchor="w",
+                ).grid(row=0, column=0, sticky="w")
+                size_str = self._format_bytes(item.get("total_bytes", 0))
+                date_str = str(item.get("trashed_at", ""))[:10]
+                tk.Label(
+                    row,
+                    text=f"Удалено: {date_str} · {size_str}",
+                    font=self.type.small,
+                    foreground=PALETTE["muted"],
+                    background=PALETTE["surface"],
+                ).grid(row=1, column=0, sticky="w")
+
+                def do_restore(m_id=item.get("meeting_id", ""), src=item.get("source_url")) -> None:
+                    try:
+                        restore_from_trash(
+                            self.app_paths.library_path,
+                            m_id,
+                            self.app_paths.data_dir,
+                            source_url=src,
+                        )
+                        self.library = self._load_library_safely()
+                        self.show_library(animated=False)
+                        refresh_trash()
+                    except Exception as exc:
+                        from tkinter import messagebox
+
+                        messagebox.showerror("Ошибка восстановления", str(exc))
+
+                ttk.Button(
+                    row,
+                    text="Восстановить",
+                    style="Secondary.TButton",
+                    command=do_restore,
+                ).grid(row=0, column=1, rowspan=2, padx=(8, 0))
+
+        def do_empty() -> None:
+            from tkinter import messagebox
+
+            if messagebox.askyesno(
+                "Очистить корзину", "Безвозвратно удалить все материалы из корзины?"
+            ):
+                empty_trash(self.app_paths.data_dir)
+                refresh_trash()
+
+        empty_btn = ttk.Button(
+            footer,
+            text="Очистить корзину",
+            style="Secondary.TButton",
+            command=do_empty,
+        )
+        empty_btn.pack(side="left")
+
+        ttk.Button(
+            footer,
+            text="Закрыть",
+            style="Primary.TButton",
+            command=dialog.destroy,
+        ).pack(side="right")
+
+        refresh_trash()
+
+    def show_system_check_dialog(self) -> None:
+        from .diagnostics import collect_system_diagnostics
+
+        diag = collect_system_diagnostics(self.app_paths)
+        dialog = tk.Toplevel(self)
+        dialog.title("Проверка системы")
+        dialog.geometry("540x440")
+        dialog.minsize(460, 360)
+        dialog.configure(background=PALETTE["canvas"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        body = tk.Frame(dialog, background=PALETTE["canvas"], padx=24, pady=20)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="Готовность системы",
+            font=self.type.heading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["canvas"],
+        ).pack(anchor="w", pady=(0, 16))
+
+        deps = diag.get("dependencies", {})
+        items = [
+            ("FFmpeg (извлечение аудио и кадров)", deps.get("ffmpeg_available", False)),
+            ("Tesseract OCR (распознавание текста)", deps.get("tesseract_available", False)),
+            ("Codex CLI (личный ChatGPT)", deps.get("codex_available", False)),
+            ("Папки приложения доступны для записи", diag.get("status") == "ok"),
+        ]
+
+        for label, ok in items:
+            row = tk.Frame(
+                body,
+                background=PALETTE["surface"],
+                highlightbackground=PALETTE["line"],
+                highlightthickness=1,
+                padx=14,
+                pady=10,
+            )
+            row.pack(fill="x", pady=4)
+            icon_text = "✓" if ok else "✕"
+            icon_color = PALETTE["success"] if ok else PALETTE["danger"]
+            tk.Label(
+                row,
+                text=icon_text,
+                font=self.type.body_bold,
+                foreground=icon_color,
+                background=PALETTE["surface"],
+                width=3,
+            ).pack(side="left")
+            tk.Label(
+                row,
+                text=label,
+                font=self.type.body,
+                foreground=PALETTE["ink"],
+                background=PALETTE["surface"],
+            ).pack(side="left", padx=8)
+
+        ttk.Button(
+            body,
+            text="Закрыть",
+            style="Primary.TButton",
+            command=dialog.destroy,
+        ).pack(side="bottom", pady=(20, 0), anchor="e")
+
+    def _rename_library_recording(self, recording: BBBRecording) -> None:
+        from tkinter import simpledialog
+
+        title = simpledialog.askstring(
+            "Переименовать лекцию", "Новое название:", initialvalue=recording.title
+        )
+        if title is None:
+            return
+        try:
+            rename_recording(
+                self.app_paths.library_path,
+                recording.meeting_id,
+                title,
+                source_url=recording.source_url,
+            )
+            self.library = self._load_library_safely()
+            self.show_library(animated=False)
+        except (ValueError, BBBImportError) as exc:
+            self._set_import_status(str(exc), PALETTE["danger"])
+
+    def _trash_library_recording(self, recording: BBBRecording) -> None:
+        from tkinter import messagebox
+
+        if not messagebox.askyesno(
+            "Переместить в корзину", f"Переместить «{recording.title}» в корзину?"
+        ):
+            return
+        try:
+            move_to_trash(
+                self.app_paths.library_path,
+                recording.meeting_id,
+                self.app_paths.data_dir,
+                source_url=recording.source_url,
+            )
+            self.library = self._load_library_safely()
+            self.show_library(animated=False)
+        except (ValueError, BBBImportError, OSError) as exc:
+            self._set_import_status(str(exc), PALETTE["danger"])
 
     def show_new_lecture(self) -> None:
         self._import_status.set("")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 28, 40, 40))
+        screen.configure(padding=(48, 36, 48, 40))
         screen.grid_columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -1249,86 +1860,131 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(28, 0))
         tk.Label(
             screen,
-            text="Вставь публичную ссылку на запись BigBlueButton. Мы быстро проверим доступные материалы.",
+            text="Один экран для ссылки BigBlueButton и файлов с компьютера.",
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=2, column=0, sticky="w", pady=(8, 26))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 24))
 
-        choices = tk.Frame(
+        source_panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=24,
+            padx=28,
             pady=24,
         )
-        choices.grid(row=3, column=0, sticky="ew")
-        choices.grid_columnconfigure(1, weight=1)
+        source_panel.grid(row=3, column=0, sticky="ew")
+        source_panel.grid_columnconfigure(0, weight=1)
+        source_panel.grid_columnconfigure(1, weight=0)
         tk.Label(
-            choices,
-            text="Источник записи",
-            font=self.type.body_bold,
+            source_panel,
+            text="BigBlueButton",
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
+            background=PALETTE["surface"],
+        ).grid(row=0, column=0, sticky="w")
         tk.Label(
-            choices,
-            text="Видео не будет скачиваться сейчас: сначала сохраним потоки и тексты слайдов в библиотеку.",
-            font=self.type.body,
-            foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(7, 20))
-        tk.Label(
-            choices,
-            text="Ссылка на BBB playback",
+            source_panel,
+            text=(
+                "Вставь ссылку на запись. Сначала приложение проверит источник и добавит "
+                "метаданные; обработку можно запустить позже из библиотеки."
+            ),
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 7))
+            background=PALETTE["surface"],
+            wraplength=720,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 15))
         source_entry = ttk.Entry(
-            choices,
+            source_panel,
             textvariable=self._bbb_url,
             style="Source.TEntry",
         )
-        source_entry.grid(row=3, column=0, columnspan=2, sticky="ew")
+        source_entry.grid(row=2, column=0, sticky="ew")
         source_entry.focus_set()
         source_entry.bind("<Return>", lambda _: self.start_bbb_import())
 
         self._import_button = ttk.Button(
-            choices,
-            text="Проверить и добавить",
+            source_panel,
+            text="Добавить по ссылке",
             style="Primary.TButton",
             command=self.start_bbb_import,
         )
-        self._import_button.grid(row=4, column=0, sticky="w", pady=(16, 0))
+        self._import_button.grid(row=2, column=1, sticky="e", padx=(12, 0))
+
+        tk.Frame(source_panel, background=PALETTE["line"], height=1).grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=24,
+        )
+        tk.Label(
+            source_panel,
+            text="Файл с компьютера",
+            font=self.type.subheading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface"],
+        ).grid(row=4, column=0, sticky="w")
+        tk.Label(
+            source_panel,
+            text="Поддерживаются MP4, MP3, M4A, WAV, MKV, WebM и AAC. Файл не покидает компьютер.",
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["surface"],
+            wraplength=720,
+            justify="left",
+        ).grid(row=5, column=0, sticky="w", pady=(5, 0))
         ttk.Button(
-            choices,
-            text="Видео с компьютера — позже",
+            source_panel,
+            text="Выбрать файл",
             style="Secondary.TButton",
-            state="disabled",
-        ).grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(16, 0))
+            command=self.start_local_media_picker,
+        ).grid(row=4, column=1, rowspan=2, sticky="e", padx=(12, 0))
+
         self._import_status_label = tk.Label(
-            choices,
+            screen,
             textvariable=self._import_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-            wraplength=700,
+            background=PALETTE["canvas"],
+            wraplength=820,
             justify="left",
         )
         self._import_status_label.grid(
-            row=5,
+            row=4,
             column=0,
-            columnspan=2,
             sticky="w",
-            pady=(14, 0),
+            pady=(16, 0),
         )
 
         self._show_screen(screen, animated=True)
+
+    def start_local_media_picker(self) -> None:
+        from tkinter import filedialog
+
+        from .local_media_import import LocalMediaImportError, import_local_media_file
+
+        chosen = filedialog.askopenfilename(
+            title="Выбери аудио или видео лекции",
+            filetypes=[
+                ("Медиафайлы", "*.mp4 *.mp3 *.m4a *.wav *.mkv *.webm *.aac"),
+                ("Все файлы", "*.*"),
+            ],
+        )
+        if not chosen:
+            return
+        try:
+            recording, _ = import_local_media_file(Path(chosen))
+            self._finish_import_success(recording)
+        except LocalMediaImportError as exc:
+            self._set_import_status(str(exc), PALETTE["danger"])
+        except Exception as exc:
+            self._set_import_status(f"Ошибка импорта: {exc}", PALETTE["danger"])
 
     def start_bbb_import(self) -> None:
         playback_url = self._bbb_url.get().strip()
@@ -1341,6 +1997,29 @@ class StudyApp(tk.Tk):
         if self._import_button is not None:
             self._import_button.state(["disabled"])
         self._set_import_status("Проверяем запись BBB и доступные материалы…", PALETTE["muted"])
+        if hasattr(self, "_job_runner"):
+
+            def task(token: CancellationToken, _: object) -> BBBRecording:
+                token.check_cancelled()
+                recording = inspect_bbb_recording(playback_url)
+                save_to_library(recording)
+                return recording
+
+            def on_event(event: JobEvent) -> None:
+                if event.event_type is JobEventType.COMPLETED:
+                    self.after(0, lambda: self._finish_import_success(event.result))
+                elif event.event_type is JobEventType.CANCELLED:
+                    self.after(0, lambda: self._finish_import_error("Импорт отменён."))
+                elif event.event_type is JobEventType.FAILED:
+                    self.after(
+                        0,
+                        lambda: self._finish_import_error(
+                            event.error or "Не удалось импортировать запись."
+                        ),
+                    )
+
+            self._job_runner.run_job(task, on_event)
+            return
         threading.Thread(
             target=self._import_bbb_worker,
             args=(playback_url,),
@@ -1416,11 +2095,18 @@ class StudyApp(tk.Tk):
             message="Подготовка начнётся после проверки локальных инструментов…",
         )
         self.show_processing_screen(recording)
-        threading.Thread(
-            target=self._local_processing_worker,
-            args=(recording, self.settings, operation_id),
-            daemon=True,
-        ).start()
+        self._start_durable_processing_job(
+            operation_id,
+            lambda token, progress: prepare_lecture(
+                recording,
+                model_name=self.settings.whisper_model,
+                frame_interval_seconds=self.settings.frame_interval_seconds,
+                enable_ocr=self.settings.ocr_enabled,
+                progress=progress,
+                cancellation_token=token,
+            ),
+            self._finish_processing_success,
+        )
 
     def start_context_packaging(self, recording: BBBRecording) -> None:
         if self._processing_active:
@@ -1438,11 +2124,74 @@ class StudyApp(tk.Tk):
                 "Нейросеть и платные API на этом шаге не используются."
             ),
         )
-        threading.Thread(
-            target=self._context_packaging_worker,
-            args=(recording, operation_id),
-            daemon=True,
-        ).start()
+        self._start_durable_processing_job(
+            operation_id,
+            lambda token, progress: build_context_package(
+                recording,
+                progress=progress,
+                cancellation_token=token,
+            ),
+            self._finish_context_package_success,
+        )
+
+    def _start_durable_processing_job(
+        self,
+        operation_id: int,
+        target,
+        on_success,
+    ) -> None:
+        """Run local preparation through JobRunner and marshal events to Tk."""
+        token = CancellationToken()
+        self._processing_token = token
+
+        def on_event(event: JobEvent) -> None:
+            self.after(
+                0,
+                lambda event=event: self._handle_processing_event(operation_id, event, on_success),
+            )
+
+        self._job_runner.run_job(target, on_event, token=token)
+
+    def _handle_processing_event(self, operation_id: int, event: JobEvent, on_success) -> None:
+        if not _operation_is_current(self, operation_id):
+            return
+        if event.event_type is JobEventType.PROGRESS:
+            self._set_processing_progress(event.percent, event.message)
+        elif event.event_type is JobEventType.COMPLETED:
+            self._processing_token = None
+            on_success(event.result)
+        elif event.event_type is JobEventType.CANCELLED:
+            self._processing_token = None
+            self._finish_processing_cancelled()
+        elif event.event_type is JobEventType.FAILED:
+            self._processing_token = None
+            error = RuntimeError(event.error or event.message or "Ошибка выполнения задачи.")
+            diagnostic_path = record_exception("processing.job", error)
+            self._processing_diagnostic_path = diagnostic_path
+            self._finish_processing_error(
+                event.error or "Подготовка остановлена из-за неожиданной ошибки."
+            )
+
+    def cancel_active_processing(self) -> None:
+        token = self._processing_token
+        if token is None or not self._processing_active:
+            return
+        token.cancel()
+        self._processing_status.set("Отменяем операцию…")
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.state(["disabled"])
+
+    def _finish_processing_cancelled(self) -> None:
+        self._processing_active = False
+        self._set_navigation_enabled(True)
+        self._processing_state.set("Отменено")
+        self._processing_percent.set("Отменено")
+        self._processing_status.set(
+            "Операция отменена. Уже скачанные материалы сохранены; её можно возобновить."
+        )
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.pack_forget()
+        self._enable_processing_return()
 
     def _prepare_processing_state(
         self,
@@ -1476,8 +2225,10 @@ class StudyApp(tk.Tk):
         description: str = "Аудио и кадры будут обработаны на этом компьютере. Платные API не используются.",
     ) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 40, 40, 40))
+        screen.configure(padding=(36, 38, 36, 40))
         screen.grid_columnconfigure(0, weight=1)
+        screen.grid_columnconfigure(1, weight=3)
+        screen.grid_columnconfigure(2, weight=1)
 
         tk.Label(
             screen,
@@ -1485,60 +2236,73 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=0, column=1, sticky="w")
 
         panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
             padx=28,
-            pady=28,
+            pady=26,
         )
-        panel.grid(row=1, column=0, sticky="ew", pady=(26, 0))
+        panel.grid(row=1, column=1, sticky="ew", pady=(24, 0))
         panel.grid_columnconfigure(0, weight=1)
         tk.Label(
             panel,
             text=recording.title,
             font=self.type.heading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             panel,
-            text=(
-                f"{format_imported_at(recording.imported_at)} · "
-                f"ID …{recording.meeting_id[-8:]}"
-            ),
+            text=(f"{format_imported_at(recording.imported_at)} · ID …{recording.meeting_id[-8:]}"),
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
+            background=PALETTE["surface"],
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
         tk.Label(
             panel,
             text=description,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=700,
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(12, 22))
-        progress_header = tk.Frame(panel, background=PALETTE["surface_soft"])
-        progress_header.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        ).grid(row=2, column=0, sticky="w", pady=(10, 20))
+
+        stage_track = tk.Frame(panel, background=PALETTE["surface_soft"], padx=12, pady=10)
+        stage_track.grid(row=3, column=0, sticky="ew", pady=(0, 18))
+        for index, label in enumerate(("Источник", "Материалы", "Конспект")):
+            stage_track.grid_columnconfigure(index, weight=1)
+            active = index == 1
+            tk.Label(
+                stage_track,
+                text=f"{index + 1}  {label}",
+                font=self.type.small if not active else self.type.body_bold,
+                foreground=PALETTE["primary_pressed"] if active else PALETTE["muted"],
+                background=PALETTE["primary_soft"] if active else PALETTE["surface_soft"],
+                padx=10,
+                pady=5,
+            ).grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 4, 0))
+
+        progress_header = tk.Frame(panel, background=PALETTE["surface"])
+        progress_header.grid(row=4, column=0, sticky="ew", pady=(0, 6))
         progress_header.grid_columnconfigure(0, weight=1)
         tk.Label(
             progress_header,
             textvariable=self._processing_state,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         self._processing_percent_label = tk.Label(
             progress_header,
             textvariable=self._processing_percent,
             font=self.type.small,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         )
         self._processing_percent_label.grid(row=0, column=1, sticky="e")
         self._processing_progress = ttk.Progressbar(
@@ -1548,27 +2312,27 @@ class StudyApp(tk.Tk):
             value=0,
             style="Processing.Horizontal.TProgressbar",
         )
-        self._processing_progress.grid(row=4, column=0, sticky="ew")
+        self._processing_progress.grid(row=5, column=0, sticky="ew")
         self._processing_status_label = tk.Label(
             panel,
             textvariable=self._processing_status,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             justify="left",
             wraplength=720,
         )
-        self._processing_status_label.grid(row=5, column=0, sticky="w", pady=(18, 0))
+        self._processing_status_label.grid(row=6, column=0, sticky="w", pady=(16, 0))
         tk.Label(
             panel,
             textvariable=self._processing_activity,
             font=self.type.small,
             foreground=PALETTE["faint"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=6, column=0, sticky="w", pady=(7, 18))
+            background=PALETTE["surface"],
+        ).grid(row=7, column=0, sticky="w", pady=(6, 16))
 
-        actions = tk.Frame(panel, background=PALETTE["surface_soft"])
-        actions.grid(row=7, column=0, sticky="w")
+        actions = tk.Frame(panel, background=PALETTE["surface"])
+        actions.grid(row=8, column=0, sticky="w")
         self._processing_retry_button = ttk.Button(
             actions,
             text="Повторить",
@@ -1585,15 +2349,22 @@ class StudyApp(tk.Tk):
             state="disabled",
         )
         self._processing_return_button.pack(side="left")
+        self._processing_cancel_button = ttk.Button(
+            actions,
+            text="Отменить",
+            style="Secondary.TButton",
+            command=self.cancel_active_processing,
+        )
+        self._processing_cancel_button.pack(side="left", padx=(10, 0))
         tk.Label(
             panel,
             textvariable=self._processing_diagnostic,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=720,
             justify="left",
-        ).grid(row=8, column=0, sticky="w", pady=(14, 0))
+        ).grid(row=9, column=0, sticky="w", pady=(14, 0))
 
         self._show_screen(screen, animated=True)
         self._start_processing_heartbeat()
@@ -1791,7 +2562,7 @@ class StudyApp(tk.Tk):
 
     def show_chat_provider_choice(self, recording: BBBRecording) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -1806,46 +2577,49 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
         tk.Label(
             screen,
             text=(
-                "Текстовый пакет лекции уже подготовлен локально. Можно создать "
-                "lesson.md автоматически через личный ChatGPT или API. DeepSeek остаётся "
-                "доступен как ручной веб-чат."
+                "Текстовый пакет лекции уже подготовлен локально. Выбери удобный сервис "
+                "для генерации конспекта."
             ),
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 24))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 20))
 
         panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=28,
-            pady=26,
+            padx=24,
+            pady=22,
         )
         panel.grid(row=3, column=0, sticky="ew")
         panel.grid_columnconfigure(0, weight=1)
 
         if self.settings.api_configured:
-            api_title = f"API · {self.settings.provider_label}"
+            api_title = f"API · {self.settings.provider_label} ({self.settings.api_model})"
             api_description = (
-                f"Модель {self.settings.api_model}. Отправятся только транскрипция, "
-                "текст слайдов и OCR; аудио, видео и данные источника останутся локально."
+                "Транскрипция, слайды и OCR будут отправлены через твой API-ключ. "
+                "Готовый конспект сохранится автоматически."
             )
             api_action_text = f"Создать через {self.settings.provider_label}"
-            api_action = lambda item=recording: self.start_api_generation(item)
+
+            def on_api_action() -> None:
+                self.show_consent_screen(recording, "api")
+
+            api_action = on_api_action
             api_action_style = "Primary.TButton"
         else:
             api_title = "API · не настроен"
             api_description = (
-                "Добавь ключ OpenAI или DeepSeek, чтобы приложение само создавало "
-                "и сохраняло готовый конспект."
+                "Добавь ключ OpenAI или DeepSeek в настройках, чтобы приложение "
+                "автоматически создавало и сохраняло готовый конспект."
             )
             api_action_text = "Настроить API"
             api_action = self.show_settings
@@ -1854,68 +2628,69 @@ class StudyApp(tk.Tk):
         tk.Label(
             panel,
             text=api_title,
-            font=self.type.heading,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             panel,
             text=api_description,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=590,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Button(
             panel,
             text=api_action_text,
             style=api_action_style,
             command=api_action,
         ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(20, 0))
+
         ttk.Separator(panel, orient="horizontal").grid(
             row=2,
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=22,
+            pady=18,
         )
 
         tk.Label(
             panel,
             text="Личный ChatGPT",
-            font=self.type.heading,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=3, column=0, sticky="w")
         self._chatgpt_status_label = tk.Label(
             panel,
             textvariable=self._chatgpt_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=590,
             justify="left",
         )
-        self._chatgpt_status_label.grid(row=4, column=0, sticky="w", pady=(5, 0))
+        self._chatgpt_status_label.grid(row=4, column=0, sticky="w", pady=(4, 0))
         tk.Label(
             panel,
             textvariable=self._chatgpt_model_summary,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=590,
             justify="left",
-        ).grid(row=5, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(4, 0))
 
-        chatgpt_model_row = tk.Frame(panel, background=PALETTE["surface_soft"])
-        chatgpt_model_row.grid(row=6, column=0, sticky="w", pady=(14, 0))
+        chatgpt_model_row = tk.Frame(panel, background=PALETTE["surface"])
+        chatgpt_model_row.grid(row=6, column=0, sticky="w", pady=(10, 0))
         tk.Label(
             chatgpt_model_row,
             text="Модель",
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).pack(side="left")
         self._chatgpt_model_combobox = ttk.Combobox(
             chatgpt_model_row,
@@ -1925,49 +2700,243 @@ class StudyApp(tk.Tk):
             width=24,
             style="Settings.TCombobox",
         )
-        self._chatgpt_model_combobox.pack(side="left", padx=(12, 0))
+        self._chatgpt_model_combobox.pack(side="left", padx=(10, 0))
         self._chatgpt_model_combobox.bind(
             "<<ComboboxSelected>>",
-            lambda _: self._set_active_chatgpt_model(
-                self._settings_chatgpt_model.get()
-            ),
+            lambda _: self._set_active_chatgpt_model(self._settings_chatgpt_model.get()),
         )
         ttk.Button(
             panel,
             textvariable=self._chatgpt_generation_action,
             style="Primary.TButton",
-            command=lambda: self.start_chatgpt_generation(recording),
+            command=lambda: self.show_consent_screen(recording, "chatgpt"),
         ).grid(row=3, column=1, rowspan=4, sticky="e", padx=(20, 0))
+
         ttk.Separator(panel, orient="horizontal").grid(
             row=7,
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=22,
+            pady=18,
         )
         tk.Label(
             panel,
-            text="DeepSeek",
-            font=self.type.heading,
+            text="DeepSeek Web",
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=8, column=0, sticky="w")
         tk.Label(
             panel,
-            text="Откроется веб-чат DeepSeek. Отправка выполняется только после твоей проверки.",
+            text="Откроется веб-чат DeepSeek. Отправка выполняется вручную только после твоей проверки.",
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=9, column=0, sticky="w", pady=(5, 0))
+            background=PALETTE["surface"],
+        ).grid(row=9, column=0, sticky="w", pady=(4, 0))
         ttk.Button(
             panel,
             text="Выбрать DeepSeek",
             style="Secondary.TButton",
-            command=lambda: self.show_deepseek_handoff(recording),
+            command=lambda: self.show_consent_screen(recording, "deepseek_handoff"),
         ).grid(row=8, column=1, rowspan=2, sticky="e", padx=(20, 0))
 
         self._show_screen(screen, animated=True)
         self._refresh_chatgpt_account()
+
+    def show_consent_screen(
+        self,
+        recording: BBBRecording,
+        flow_type: str,
+    ) -> None:
+        from .local_pipeline import default_lecture_directory
+
+        target = default_lecture_directory(recording)
+        context_path = target / "lesson-context.md"
+
+        provider_label = ""
+        if flow_type == "api":
+            provider_label = f"API {self.settings.provider_label} ({self.settings.api_model})"
+        elif flow_type == "chatgpt":
+            selected_model = (
+                self._settings_chatgpt_model.get().strip() or self.settings.chatgpt_model
+            )
+            provider_label = f"Личный ChatGPT ({selected_model})"
+        elif flow_type == "deepseek_handoff":
+            provider_label = "DeepSeek Web"
+            self._active_handoff = None
+            self._active_handoff_provider = None
+            try:
+                self._active_handoff = prepare_deepseek_handoff(recording, directory=target)
+                self._active_handoff_provider = "DeepSeek"
+            except DeepSeekHandoffError as exc:
+                self._handoff_status.set(str(exc))
+                return
+
+        prompt_path = target / "lesson-prompt.md"
+        size_kb = 0
+        char_count = 0
+        limit_warning = ""
+        txt = ""
+        prompt_txt = ""
+        if context_path.is_file():
+            try:
+                txt = context_path.read_text(encoding="utf-8")
+            except OSError:
+                pass
+        if prompt_path.is_file():
+            try:
+                prompt_txt = prompt_path.read_text(encoding="utf-8")
+            except OSError:
+                pass
+
+        total_bytes = len(txt.encode("utf-8")) + len(prompt_txt.encode("utf-8"))
+        char_count = len(txt) + len(prompt_txt)
+        size_kb = max(1, total_bytes // 1024)
+
+        provider_name = (
+            "chatgpt"
+            if flow_type == "chatgpt"
+            else "deepseek"
+            if flow_type == "deepseek_handoff"
+            else "openrouter"
+        )
+        try:
+            validate_provider_context_limits(provider_name, char_count, total_bytes)
+        except OutboundContextError as exc:
+            limit_warning = f"Внимание: {exc}"
+
+        screen = ttk.Frame(self.content, style="TFrame")
+        screen.configure(padding=(36, 28, 36, 36))
+        screen.grid_columnconfigure(0, weight=1)
+
+        ttk.Button(
+            screen,
+            text="← Назад к выбору",
+            style="Secondary.TButton",
+            command=lambda: self.show_chat_provider_choice(recording),
+        ).grid(row=0, column=0, sticky="w")
+
+        tk.Label(
+            screen,
+            text="Подтверждение передачи материалов",
+            font=self.type.title,
+            foreground=PALETTE["ink"],
+            background=PALETTE["canvas"],
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
+
+        tk.Label(
+            screen,
+            text=(f"Лекция: «{recording.title}»\nПолучатель: {provider_label}"),
+            font=self.type.body_bold,
+            foreground=PALETTE["ink"],
+            background=PALETTE["canvas"],
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(10, 0))
+
+        transmitted_panel = tk.Frame(
+            screen,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=22,
+            pady=18,
+        )
+        transmitted_panel.grid(row=3, column=0, sticky="ew", pady=(20, 0))
+
+        tk.Label(
+            transmitted_panel,
+            text=f"Передаётся в {provider_label}:",
+            font=self.type.subheading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface"],
+        ).grid(row=0, column=0, sticky="w")
+
+        details = [
+            "• Текст транскрипции (речь лектора по временным блокам)",
+            "• Текст со слайдов презентации",
+            "• Текстовые заметки с экрана (OCR)",
+            "• Учебный промпт (требования к формату конспекта)",
+            f"• Примерный объём: ~{size_kb} КБ ({char_count:,} символов)",
+        ]
+        tk.Label(
+            transmitted_panel,
+            text="\n".join(details),
+            font=self.type.body,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface"],
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        if limit_warning:
+            tk.Label(
+                transmitted_panel,
+                text=limit_warning,
+                font=self.type.small,
+                foreground=PALETTE["danger"],
+                background=PALETTE["surface"],
+                justify="left",
+                wraplength=620,
+            ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+        local_panel = tk.Frame(
+            screen,
+            background=PALETTE["surface_soft"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=22,
+            pady=18,
+        )
+        local_panel.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+
+        tk.Label(
+            local_panel,
+            text="Остаётся на этом компьютере (не передаётся):",
+            font=self.type.subheading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface_soft"],
+        ).grid(row=0, column=0, sticky="w")
+
+        local_details = [
+            "✓ Исходный URL BigBlueButton",
+            "✓ Идентификатор встречи (meeting ID)",
+            "✓ Исходные медиафайлы записи (аудио и видео)",
+            "✓ Локальные пути к файлам и служебные логи",
+        ]
+        tk.Label(
+            local_panel,
+            text="\n".join(local_details),
+            font=self.type.body,
+            foreground=PALETTE["success"],
+            background=PALETTE["surface_soft"],
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        btn_row = tk.Frame(screen, background=PALETTE["canvas"])
+        btn_row.grid(row=5, column=0, sticky="w", pady=(20, 0))
+
+        def on_confirm() -> None:
+            if flow_type == "api":
+                self.start_api_generation(recording)
+            elif flow_type == "chatgpt":
+                self.start_chatgpt_generation(recording)
+            elif flow_type == "deepseek_handoff":
+                self._launch_active_handoff()
+
+        ttk.Button(
+            btn_row,
+            text="Передать и продолжить",
+            style="Primary.TButton",
+            command=on_confirm,
+        ).pack(side="left")
+
+        ttk.Button(
+            btn_row,
+            text="Отмена",
+            style="Secondary.TButton",
+            command=lambda: self.show_chat_provider_choice(recording),
+        ).pack(side="left", padx=(10, 0))
+
+        self._show_screen(screen, animated=True)
 
     def start_api_generation(self, recording: BBBRecording) -> None:
         if self._processing_active:
@@ -1993,11 +2962,49 @@ class StudyApp(tk.Tk):
                 "Полученный Markdown будет сохранён как lesson.md на этом компьютере."
             ),
         )
+        if hasattr(self, "_job_runner"):
+            self._start_api_job(recording, self.settings, operation_id)
+            return
         threading.Thread(
             target=self._api_generation_worker,
             args=(recording, self.settings, operation_id),
             daemon=True,
         ).start()
+
+    def _start_api_job(
+        self,
+        recording: BBBRecording,
+        settings: AppSettings,
+        operation_id: int,
+    ) -> None:
+        def task(token: CancellationToken, progress) -> ApiLessonResult:
+            token.check_cancelled()
+            return generate_lesson_via_api(
+                recording, settings, progress=progress, cancellation_token=token
+            )
+
+        def on_event(event: JobEvent) -> None:
+            def apply_event() -> None:
+                if not _operation_is_current(self, operation_id):
+                    return
+                if event.event_type is JobEventType.PROGRESS:
+                    self._set_processing_progress(event.percent, event.message)
+                elif event.event_type is JobEventType.COMPLETED:
+                    self._finish_api_generation_success(recording, event.result)
+                elif event.event_type is JobEventType.CANCELLED:
+                    self._finish_processing_cancelled()
+                elif event.event_type is JobEventType.FAILED:
+                    error = RuntimeError(event.error or event.message)
+                    self._processing_diagnostic_path = record_exception("generation.api", error)
+                    self._finish_processing_error(
+                        event.error or "Не удалось создать конспект через API."
+                    )
+
+            self.after(0, apply_event)
+
+        token = CancellationToken()
+        self._processing_token = token
+        self._job_runner.run_job(task, on_event, token=token)
 
     def _api_generation_worker(
         self,
@@ -2018,6 +3025,7 @@ class StudyApp(tk.Tk):
                         message,
                     ),
                 ),
+                cancellation_token=getattr(self, "_processing_token", None),
             )
         except ApiGenerationError as exc:
             diagnostic_path = record_exception(
@@ -2078,8 +3086,7 @@ class StudyApp(tk.Tk):
             350,
             lambda item=recording, operation_id=operation_id: (
                 self.show_lesson_reader(item)
-                if operation_id == self._processing_operation_id
-                and not self._processing_active
+                if operation_id == self._processing_operation_id and not self._processing_active
                 else None
             ),
         )
@@ -2088,10 +3095,7 @@ class StudyApp(tk.Tk):
         if self._processing_active:
             return
 
-        selected_model = (
-            self._settings_chatgpt_model.get().strip()
-            or self.settings.chatgpt_model
-        )
+        selected_model = self._settings_chatgpt_model.get().strip() or self.settings.chatgpt_model
         self._set_active_chatgpt_model(selected_model)
         account_operation_id = self._next_chatgpt_account_operation()
         operation_id = self._prepare_processing_state(
@@ -2107,6 +3111,9 @@ class StudyApp(tk.Tk):
                 "твой вход в ChatGPT, а готовый Markdown сохраняется локально как lesson.md."
             ),
         )
+        if hasattr(self, "_job_runner"):
+            self._start_chatgpt_job(recording, selected_model, operation_id, account_operation_id)
+            return
         threading.Thread(
             target=self._chatgpt_generation_worker,
             args=(
@@ -2117,6 +3124,71 @@ class StudyApp(tk.Tk):
             ),
             daemon=True,
         ).start()
+
+    def _start_chatgpt_job(
+        self,
+        recording: BBBRecording,
+        model: str,
+        operation_id: int,
+        account_operation_id: int,
+    ) -> None:
+        def task(
+            token: CancellationToken, progress
+        ) -> tuple[ChatGPTGenerationResult, ChatGPTAccountStatus, list[ChatGPTModel], str]:
+            token.check_cancelled()
+            progress(10, "Проверяем вход в ChatGPT…")
+            status = chatgpt_account_status()
+            if not status.signed_in:
+                progress(
+                    20, "Заверши вход в открывшемся окне — генерация продолжится автоматически."
+                )
+                status = login_with_chatgpt()
+            if not status.signed_in:
+                raise ChatGPTAccountError(
+                    "Вход в ChatGPT не завершён. Повтори попытку и закончи авторизацию."
+                )
+            models: list[ChatGPTModel] = []
+            model_error = ""
+            try:
+                models = list_chatgpt_models()
+            except ChatGPTAccountError as exc:
+                model_error = str(exc)
+            progress(45, f"Готовим запрос для модели {model}…")
+            result = generate_lesson_with_chatgpt(
+                recording,
+                model,
+                progress=lambda percent, message: progress(
+                    min(95, 45 + max(0, min(100, percent)) // 2), message
+                ),
+                cancellation_token=token,
+            )
+            return result, status, models, model_error
+
+        def on_event(event: JobEvent) -> None:
+            def apply_event() -> None:
+                if not _operation_is_current(self, operation_id):
+                    return
+                if event.event_type is JobEventType.COMPLETED and isinstance(event.result, tuple):
+                    result, status, models, model_error = event.result
+                    self._finish_chatgpt_account_refresh(
+                        account_operation_id, status, models, model_error
+                    )
+                    self._finish_chatgpt_generation_success(recording, result)
+                elif event.event_type is JobEventType.CANCELLED:
+                    self._finish_processing_cancelled()
+                elif event.event_type is JobEventType.FAILED:
+                    error = RuntimeError(event.error or event.message)
+                    self._processing_diagnostic_path = record_exception("generation.chatgpt", error)
+                    self._finish_processing_error(
+                        event.error
+                        or "Неожиданная ошибка остановила создание конспекта через ChatGPT."
+                    )
+
+            self.after(0, apply_event)
+
+        token = CancellationToken()
+        self._processing_token = token
+        self._job_runner.run_job(task, on_event, token=token)
 
     def _chatgpt_generation_worker(
         self,
@@ -2184,19 +3256,18 @@ class StudyApp(tk.Tk):
                 recording,
                 model,
                 progress=generation_progress,
+                cancellation_token=getattr(self, "_processing_token", None),
             )
         except ChatGPTAccountError as exc:
             diagnostic_path = record_exception("generation.chatgpt", exc)
             message = str(exc)
             self.after(
                 0,
-                lambda message=message, diagnostic_path=diagnostic_path: (
-                    _deliver_processing_error(
-                        self,
-                        operation_id,
-                        message,
-                        diagnostic_path,
-                    )
+                lambda message=message, diagnostic_path=diagnostic_path: _deliver_processing_error(
+                    self,
+                    operation_id,
+                    message,
+                    diagnostic_path,
                 ),
             )
         except Exception as exc:
@@ -2243,8 +3314,7 @@ class StudyApp(tk.Tk):
             350,
             lambda item=recording, operation_id=operation_id: (
                 self.show_lesson_reader(item)
-                if operation_id == self._processing_operation_id
-                and not self._processing_active
+                if operation_id == self._processing_operation_id and not self._processing_active
                 else None
             ),
         )
@@ -2254,6 +3324,8 @@ class StudyApp(tk.Tk):
 
     def _show_web_chat_handoff(self, recording: BBBRecording) -> None:
         provider = "DeepSeek"
+        self._active_handoff = None
+        self._active_handoff_provider = None
         try:
             handoff = prepare_deepseek_handoff(recording)
             description = (
@@ -2272,7 +3344,7 @@ class StudyApp(tk.Tk):
         )
 
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
@@ -2288,69 +3360,72 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
 
         panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=28,
-            pady=28,
+            padx=24,
+            pady=24,
         )
-        panel.grid(row=2, column=0, sticky="nsew", pady=(24, 0))
+        panel.grid(row=2, column=0, sticky="nsew", pady=(20, 0))
         panel.grid_columnconfigure(0, weight=1)
         tk.Label(
             panel,
             text=recording.title,
             font=self.type.heading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             panel,
             text=description,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=720,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(8, 22))
+        ).grid(row=1, column=0, sticky="w", pady=(6, 18))
 
+        from .platform_services import PlatformKeyboardConventions
+
+        shortcut = PlatformKeyboardConventions().format_shortcut("V")
         steps = (
             "1. Выбери новый или нужный существующий чат.\n"
             "2. Прикрепи lesson-context.md из открывшейся папки.\n"
-            "3. Вставь инструкцию из буфера сочетанием Ctrl+V и сам отправь сообщение."
+            f"3. Вставь инструкцию из буфера сочетанием {shortcut} и сам отправь сообщение."
         )
         tk.Label(
             panel,
             text=steps,
             font=self.type.body,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             justify="left",
         ).grid(row=2, column=0, sticky="w")
         ttk.Button(
             panel,
             text=f"Открыть {provider} и скопировать инструкцию",
             style="Primary.TButton",
-            command=self._launch_active_handoff,
-        ).grid(row=3, column=0, sticky="w", pady=(26, 0))
+            command=lambda: self.show_consent_screen(recording, "deepseek_handoff"),
+        ).grid(row=3, column=0, sticky="w", pady=(22, 0))
         ttk.Button(
             panel,
             text="Я получил ответ — вставить и сохранить",
             style="Secondary.TButton",
             command=lambda: self.show_lesson_editor(recording),
-        ).grid(row=4, column=0, sticky="w", pady=(12, 0))
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
         tk.Label(
             panel,
             textvariable=self._handoff_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             justify="left",
             wraplength=720,
-        ).grid(row=5, column=0, sticky="w", pady=(18, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(16, 0))
 
         self._show_screen(screen, animated=True)
 
@@ -2361,26 +3436,32 @@ class StudyApp(tk.Tk):
             self._handoff_status.set("Сначала выбери лекцию с готовым пакетом контекста.")
             return
 
+        from .platform_services import PlatformKeyboardConventions
+
+        shortcut = PlatformKeyboardConventions().format_shortcut("V")
         try:
+            context_text = handoff.context_path.read_text(encoding="utf-8")
             prompt = handoff.prompt_path.read_text(encoding="utf-8").strip()
+            _validate_outbound_text("context", context_text, ())
+            _validate_outbound_text("prompt", prompt, ())
             self.clipboard_clear()
             self.clipboard_append(prompt)
             self.update()
             launch_deepseek_handoff(handoff)
-        except (DeepSeekHandoffError, OSError) as exc:
+        except (DeepSeekHandoffError, OutboundContextError, OSError) as exc:
             self._handoff_status.set(str(exc))
         except tk.TclError:
             self._handoff_status.set("Не удалось скопировать инструкцию в буфер обмена.")
         else:
             self._handoff_status.set(
                 f"{provider} и папка с файлом открыты. Выбери нужный чат, прикрепи "
-                "lesson-context.md, вставь Ctrl+V и отправь сообщение."
+                f"lesson-context.md, вставь {shortcut} и отправь сообщение."
             )
 
     def show_lesson_editor(self, recording: BBBRecording) -> None:
         self._lesson_status.set("")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(48, 32, 48, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(3, weight=1)
 
@@ -2396,7 +3477,7 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
         tk.Label(
             screen,
             text=(
@@ -2408,13 +3489,13 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=780,
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 18))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 16))
 
         editor = scrolledtext.ScrolledText(
             screen,
             font=self.type.body,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             insertbackground=PALETTE["ink"],
             relief="solid",
             borderwidth=1,
@@ -2433,7 +3514,7 @@ class StudyApp(tk.Tk):
         self._lesson_editor = editor
 
         actions = tk.Frame(screen, background=PALETTE["canvas"])
-        actions.grid(row=4, column=0, sticky="ew", pady=(18, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(16, 0))
         ttk.Button(
             actions,
             text="Сохранить lesson.md",
@@ -2477,9 +3558,10 @@ class StudyApp(tk.Tk):
             return
 
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(3, weight=1)
+
         ttk.Button(
             screen,
             text="← К библиотеке",
@@ -2488,44 +3570,250 @@ class StudyApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             screen,
-            text="Готовый конспект",
+            text="Конспект",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
         tk.Label(
             screen,
             text=recording.title,
-            font=self.type.body_bold,
-            foreground=PALETTE["muted"],
+            font=self.type.heading,
+            foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=2, column=0, sticky="w", pady=(8, 18))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 16))
 
-        reader = scrolledtext.ScrolledText(
-            screen,
-            font=self.type.body,
+        reader_area = tk.Frame(screen, background=PALETTE["canvas"])
+        reader_area.grid(row=3, column=0, sticky="nsew")
+        reader_area.grid_rowconfigure(0, weight=1)
+        reader_area.grid_columnconfigure(1, weight=1)
+        toc_panel = tk.Frame(
+            reader_area,
+            background=PALETTE["surface_soft"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=14,
+            pady=14,
+        )
+        toc_panel.grid(row=0, column=0, sticky="ns", padx=(0, 14))
+        tk.Label(
+            toc_panel,
+            text="Содержание",
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["surface_soft"],
+        ).pack(anchor="w", pady=(0, 10))
+        toc_list = tk.Listbox(
+            toc_panel,
+            width=26,
+            exportselection=False,
+            background=PALETTE["surface_soft"],
+            foreground=PALETTE["ink"],
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=self.type.small,
+            activestyle="none",
+            selectbackground=PALETTE["primary_soft"],
+            selectforeground=PALETTE["primary_pressed"],
+        )
+        toc_list.pack(fill="both", expand=True)
+        reader = scrolledtext.ScrolledText(
+            reader_area,
+            font=self.type.body,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface"],
             relief="solid",
             borderwidth=1,
             wrap="word",
-            padx=18,
-            pady=16,
+            padx=34,
+            pady=28,
         )
-        reader.grid(row=3, column=0, sticky="nsew")
+        reader.grid(row=0, column=1, sticky="nsew")
         reader.insert("1.0", content)
-        reader.configure(state="disabled")
+        rec_key = recording.lecture_id or recording.meeting_id
+        saved_pos = self._reading_positions.get(rec_key)
+        if saved_pos is not None:
+            reader.after(50, lambda: reader.yview_moveto(saved_pos))
+
+        toc_entries = extract_table_of_contents(content)
+        for entry in toc_entries:
+            toc_list.insert("end", f"{'  ' * (entry.level - 1)}{entry.title}")
+
+        def jump_to_toc(_: tk.Event | None = None) -> None:
+            selection = toc_list.curselection()
+            if selection:
+                reader.see(f"{toc_entries[selection[0]].line_number}.0")
+                reader.mark_set("insert", f"{toc_entries[selection[0]].line_number}.0")
+
+        toc_list.bind("<<ListboxSelect>>", jump_to_toc)
+        timestamp_lines = extract_timestamps(content)
+        reader.tag_configure("timestamp", foreground=PALETTE["primary"], underline=True)
+        for timestamp in timestamp_lines:
+            reader.tag_add(
+                "timestamp", f"{timestamp.line_number}.0", f"{timestamp.line_number}.end"
+            )
+
+        def show_timestamp(event: tk.Event) -> None:
+            index = reader.index(f"@{event.x},{event.y}")
+            line = int(str(index).split(".", 1)[0])
+            matching = [item for item in timestamp_lines if item.line_number == line]
+            if matching:
+                ts = matching[0]
+                self._lesson_status.set(f"Таймкод {ts.raw_str} · {int(ts.total_seconds)} сек.")
+                self._open_timestamp_media_or_frame(recording, ts.total_seconds)
+
+        reader.tag_bind("timestamp", "<Button-1>", show_timestamp)
+
+        def update_reader_position(_: tk.Event | None = None) -> None:
+            try:
+                self._reading_positions[rec_key] = reader.yview()[0]
+            except Exception:
+                pass
+            current_line = int(str(reader.index("insert")).split(".", 1)[0])
+            total_lines = int(str(reader.index("end-1c")).split(".", 1)[0])
+            self._lesson_status.set(f"Позиция: строка {current_line} из {total_lines}")
+
+        reader.bind("<ButtonRelease-1>", update_reader_position, add="+")
+        reader.bind("<KeyRelease>", update_reader_position, add="+")
+        reader.bind("<MouseWheel>", update_reader_position, add="+")
+        actions = tk.Frame(screen, background=PALETTE["canvas"])
+        actions.grid(row=4, column=0, sticky="ew", pady=(16, 0))
+
         ttk.Button(
-            screen,
+            actions,
             text="Изменить конспект",
-            style="Secondary.TButton",
+            style="Primary.TButton",
             command=lambda: self.show_lesson_editor(recording),
-        ).grid(row=4, column=0, sticky="w", pady=(18, 0))
+        ).pack(side="left")
+
+        def export_html() -> None:
+            from tkinter import filedialog
+
+            from .lesson_export import export_lesson_to_html_file
+
+            dest = filedialog.asksaveasfilename(
+                title="Экспорт конспекта в HTML",
+                defaultextension=".html",
+                filetypes=[("HTML страницы", "*.html")],
+                initialfile=f"{recording.title[:40]}.html",
+            )
+            if dest:
+                export_lesson_to_html_file(recording.title, content, Path(dest))
+
+        def export_zip() -> None:
+            from tkinter import filedialog
+
+            from .library_manager import export_lecture_archive
+            from .local_pipeline import default_lecture_directory
+
+            dest = filedialog.asksaveasfilename(
+                title="Экспорт чистого архива лекции",
+                defaultextension=".zip",
+                filetypes=[("ZIP архивы", "*.zip")],
+                initialfile=f"{recording.title[:40]}.zip",
+            )
+            if dest:
+                export_lecture_archive(default_lecture_directory(recording), Path(dest))
+
+        ttk.Button(
+            actions,
+            text="Экспорт в HTML",
+            style="Link.TButton",
+            command=export_html,
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Button(
+            actions,
+            text="Экспорт архива (.zip)",
+            style="Link.TButton",
+            command=export_zip,
+        ).pack(side="left", padx=(8, 0))
+
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(actions, textvariable=search_var, width=20, style="Source.TEntry")
+        search_entry.pack(side="left", padx=(16, 0))
+
+        def find_next() -> None:
+            query = search_var.get().strip()
+            if not query:
+                return
+            start = reader.index("insert")
+            found = reader.search(query, start, nocase=True, stopindex="end")
+            if not found:
+                found = reader.search(query, "1.0", nocase=True, stopindex=start)
+            if found:
+                reader.tag_remove("search", "1.0", "end")
+                reader.tag_add("search", found, f"{found}+{len(query)}c")
+                reader.tag_configure("search", background="#FFF3B0")
+                reader.see(found)
+                reader.mark_set("insert", found)
+
+        ttk.Button(actions, text="Найти", style="Link.TButton", command=find_next).pack(
+            side="left", padx=(6, 0)
+        )
+
+        def export_pdf() -> None:
+            from tkinter import filedialog, messagebox
+
+            from .lesson_export import export_lesson_to_pdf_file
+
+            dest = filedialog.asksaveasfilename(
+                title="Экспорт конспекта в PDF",
+                defaultextension=".pdf",
+                filetypes=[("PDF документы", "*.pdf")],
+                initialfile=f"{recording.title[:40]}.pdf",
+            )
+            if not dest:
+                return
+            try:
+                export_lesson_to_pdf_file(recording.title, content, Path(dest))
+            except RuntimeError as exc:
+                messagebox.showerror("Экспорт PDF", str(exc))
+
+        ttk.Button(actions, text="Экспорт в PDF", style="Link.TButton", command=export_pdf).pack(
+            side="left", padx=(8, 0)
+        )
+
+        tk.Label(
+            actions,
+            textvariable=self._lesson_status,
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["canvas"],
+        ).pack(side="left", padx=(12, 0))
 
         self._show_screen(screen, animated=True)
 
+    def _open_timestamp_media_or_frame(self, recording: BBBRecording, total_seconds: float) -> None:
+        from .platform_services import PlatformSystemActions
+
+        lec_dir = default_lecture_directory(recording, base_dir=self.app_paths.data_dir)
+        frames_dir = lec_dir / "frames"
+        if frames_dir.is_dir():
+            frames = sorted(frames_dir.glob("frame-*.jpg"))
+            if frames:
+                interval = 60
+                interval_path = frames_dir / "interval-seconds.txt"
+                if interval_path.is_file():
+                    try:
+                        interval = int(interval_path.read_text(encoding="ascii").strip())
+                    except Exception:
+                        pass
+                idx = min(len(frames) - 1, max(0, int(round(total_seconds / max(1, interval)))))
+                PlatformSystemActions().open_in_file_manager(frames[idx])
+                return
+
+        audio_file = lec_dir / "audio.mp4"
+        if audio_file.is_file():
+            PlatformSystemActions().open_in_file_manager(audio_file)
+            return
+
+        PlatformSystemActions().open_in_file_manager(lec_dir)
+
     def _finish_processing_error(self, message: str) -> None:
         self._processing_active = False
+        self._processing_token = None
         self._set_navigation_enabled(True)
         self._processing_state.set("Ошибка")
         self._processing_percent.set("Ошибка")
@@ -2536,9 +3824,15 @@ class StudyApp(tk.Tk):
                 value=0,
                 style="Error.Horizontal.TProgressbar",
             )
-        if self._processing_status_label is not None and self._processing_status_label.winfo_exists():
+        if (
+            self._processing_status_label is not None
+            and self._processing_status_label.winfo_exists()
+        ):
             self._processing_status_label.configure(foreground=PALETTE["danger"])
-        if self._processing_percent_label is not None and self._processing_percent_label.winfo_exists():
+        if (
+            self._processing_percent_label is not None
+            and self._processing_percent_label.winfo_exists()
+        ):
             self._processing_percent_label.configure(foreground=PALETTE["danger"])
         if self._processing_diagnostic_path is not None:
             self._processing_diagnostic.set(
@@ -2557,6 +3851,8 @@ class StudyApp(tk.Tk):
                 padx=(0, 10),
             )
         self._enable_processing_return()
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.pack_forget()
 
     def _set_processing_progress(self, percent: int, message: str) -> None:
         """Show honest stage progress instead of estimating an unreliable duration."""
@@ -2572,24 +3868,36 @@ class StudyApp(tk.Tk):
                 value=bounded,
                 style="Processing.Horizontal.TProgressbar",
             )
-        if self._processing_status_label is not None and self._processing_status_label.winfo_exists():
+        if (
+            self._processing_status_label is not None
+            and self._processing_status_label.winfo_exists()
+        ):
             self._processing_status_label.configure(foreground=PALETTE["muted"])
-        if self._processing_percent_label is not None and self._processing_percent_label.winfo_exists():
+        if (
+            self._processing_percent_label is not None
+            and self._processing_percent_label.winfo_exists()
+        ):
             self._processing_percent_label.configure(foreground=PALETTE["ink"])
         if message:
             self._processing_status.set(message)
 
     def _mark_processing_success(self) -> None:
         self._processing_active = False
+        self._processing_token = None
         self._set_navigation_enabled(True)
         self._processing_state.set("Готово")
         self._processing_percent.set("100%")
         self._processing_diagnostic.set("")
-        if self._processing_status_label is not None and self._processing_status_label.winfo_exists():
+        if (
+            self._processing_status_label is not None
+            and self._processing_status_label.winfo_exists()
+        ):
             self._processing_status_label.configure(foreground=PALETTE["success"])
         retry = self._processing_retry_button
         if retry is not None and retry.winfo_exists():
             retry.pack_forget()
+        if self._processing_cancel_button is not None:
+            self._processing_cancel_button.pack_forget()
 
     def _enable_processing_return(self) -> None:
         if (
@@ -2634,6 +3942,11 @@ class StudyApp(tk.Tk):
 
 def main() -> None:
     app = StudyApp()
+    if "--smoke-test-gui" in sys.argv:
+        app.after(500, app.destroy)
+        app.mainloop()
+        sys.stdout.write("GUI smoke test passed\n")
+        return
     app.mainloop()
 
 

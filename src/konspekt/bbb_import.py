@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from xml.etree import ElementTree
 
 import requests
@@ -129,21 +129,18 @@ def load_library(path: Path | None = None) -> list[BBBRecording]:
 
 
 def save_to_library(recording: BBBRecording, path: Path | None = None) -> None:
-    """Persist one recording, replacing only the same recording from the same BBB."""
+    """Persist one imported recording and replace an older copy of the same BBB id."""
 
     library_path = path or default_library_path()
     existing = load_library(library_path)
-    identity = recording_identity(recording)
-    updated = [item for item in existing if recording_identity(item) != identity]
+    updated = [item for item in existing if item.meeting_id != recording.meeting_id]
     updated.insert(0, recording)
 
     library_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = library_path.with_suffix(f"{library_path.suffix}.tmp")
-    temporary_path.write_text(
+    library_path.write_text(
         json.dumps([item.to_dict() for item in updated], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    temporary_path.replace(library_path)
 
 
 def default_library_path() -> Path:
@@ -151,42 +148,6 @@ def default_library_path() -> Path:
 
     base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     return base / "Konspekt" / "library.json"
-
-
-def recording_identity(recording: BBBRecording) -> tuple[str, str]:
-    """Identify a recording within its BBB server, not across unrelated hosts."""
-
-    return (_source_origin(recording.source_url), recording.meeting_id)
-
-
-def _source_origin(source_url: str) -> str:
-    parsed = urlparse(source_url.strip())
-    host = (parsed.hostname or "").casefold()
-    if not host:
-        return source_url.strip().casefold()
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
-    if port and port not in {80, 443}:
-        return f"{host}:{port}"
-    return host
-
-
-def format_imported_at(value: str, *, timezone: tzinfo | None = None) -> str:
-    """Format a stored UTC timestamp in the user's local timezone."""
-
-    try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except (AttributeError, TypeError, ValueError):
-        return "Дата добавления неизвестна"
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    try:
-        local = parsed.astimezone(timezone)
-    except (OSError, OverflowError, ValueError):
-        return "Дата добавления неизвестна"
-    return f"Добавлено {local:%d.%m.%Y, %H:%M}"
 
 
 def _asset_url(info: RecordingInfo, relative_path: str) -> str:
