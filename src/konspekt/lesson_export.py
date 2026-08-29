@@ -131,9 +131,9 @@ def export_lesson_to_pdf_file(
 ) -> Path:
     """Export a lesson to a PDF that displays Cyrillic without viewer fonts.
 
-    WeasyPrint and wkhtmltopdf remain preferred when installed.  The bundled
+    WeasyPrint and wkhtmltopdf remain preferred when installed. The bundled
     fallback rasterizes each page with a verified Cyrillic-capable system font
-    and embeds the page pixels in the PDF.  Unlike the previous Identity-H /
+    and embeds the page pixels in the PDF. Unlike the previous Identity-H /
     Helvetica construction, the resulting document does not rely on font
     substitution by the PDF viewer.
     """
@@ -236,7 +236,7 @@ def _render_pdf_page_images(title: str, markdown_content: str) -> list[Any]:
     pages: list[Any] = []
     image: Any
     draw: Any
-    cursor_y: int
+    cursor_y = 0
 
     def new_page(*, continuation: bool = False) -> None:
         nonlocal image, draw, cursor_y

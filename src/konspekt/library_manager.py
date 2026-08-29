@@ -8,7 +8,8 @@ import os
 import shutil
 import zipfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone as dt_timezone, tzinfo
+from datetime import datetime, tzinfo
+from datetime import timezone as dt_timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
