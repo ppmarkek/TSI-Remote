@@ -20,12 +20,14 @@ from .bbb_download import resolve_ffmpeg
 from .bbb_import import (
     BBBImportError,
     BBBRecording,
+)
+from .job_runner import CancellationToken, JobCancelledError, terminate_process_tree
+from .lecture_manifest import ALGORITHM_VERSION, LectureManifest, ManifestError, file_sha256
+from .library_manager import (
     default_library_path,
     load_library,
     recording_identity,
 )
-from .job_runner import CancellationToken, JobCancelledError, terminate_process_tree
-from .lecture_manifest import ALGORITHM_VERSION, LectureManifest, ManifestError, file_sha256
 
 
 class LocalProcessingError(RuntimeError):
@@ -78,10 +80,9 @@ def default_lecture_directory(
         else (default_library_path().parent / "lectures")
     )
     meeting_id = recording.meeting_id.strip()
-    # New library rows carry a stable origin-aware lecture_id.  Prefer it so
-    # a later re-import or title change cannot move an existing cache.
-    if recording.lecture_id:
-        directory_name = recording.lecture_id
+    lecture_id = getattr(recording, "lecture_id", None)
+    if lecture_id:
+        directory_name = lecture_id
         target = base / directory_name
         try:
             target.resolve().relative_to(base.resolve())
@@ -224,15 +225,25 @@ def prepare_lecture(
         _extract_audio(ffmpeg, webcam_path, audio_path, command_runner, cancellation_token)
     notify(36, "Аудио подготовлено.")
 
-    manifest_was_present = (target / "lecture-manifest.json").is_file()
-    manifest = LectureManifest.for_recording(
-        recording.title,
-        recording.meeting_id,
-        recording.source_url,
-        target,
-    )
     manifest_path = target / "lecture-manifest.json"
-    if not manifest_path.is_file():
+    manifest_was_present = manifest_path.is_file()
+    if manifest_was_present:
+        try:
+            manifest = LectureManifest.load(manifest_path)
+        except ManifestError:
+            manifest = LectureManifest.for_recording(
+                recording.title,
+                recording.meeting_id,
+                recording.source_url,
+                target,
+            )
+    else:
+        manifest = LectureManifest.for_recording(
+            recording.title,
+            recording.meeting_id,
+            recording.source_url,
+            target,
+        )
         _save_manifest(manifest, manifest_path)
 
     # Record the exact downloaded/local source bytes.  A later re-import can
@@ -269,11 +280,6 @@ def prepare_lecture(
             can_reuse_transcript = manifest.is_stage_valid(
                 "transcription", transcription_fp, target
             )
-        else:
-            # A legacy cache has no model/input fingerprint.  Reuse only the
-            # historical default model; any explicit model change must force a
-            # fresh transcription.
-            can_reuse_transcript = not manifest_was_present and model_name == "base"
 
     if can_reuse_transcript:
         notify(66, "Используем уже готовую локальную транскрипцию.")
@@ -282,10 +288,11 @@ def prepare_lecture(
         recognise = transcriber or faster_whisper_transcribe(
             model_name,
             progress=notify,
+            cancellation_token=cancellation_token,
         )
         try:
             segments = tuple(recognise(audio_path, language))
-        except LocalProcessingError:
+        except (LocalProcessingError, JobCancelledError):
             raise
         except subprocess.TimeoutExpired as exc:
             raise LocalProcessingError(
@@ -319,7 +326,12 @@ def prepare_lecture(
 
     if recording.screen_video_url and not enable_ocr:
         existing_screen_notes = target / "screen-notes.json"
-        if _screen_notes_cache_is_valid(existing_screen_notes):
+        if (
+            _screen_notes_cache_is_valid(existing_screen_notes)
+            and manifest_path.is_file()
+            and manifest_was_present
+            and manifest.is_stage_valid("ocr", ocr_fp, target)
+        ):
             screen_notes_path = existing_screen_notes
             notify(96, "Используем уже готовые заметки с экрана.")
         else:
@@ -350,9 +362,40 @@ def prepare_lecture(
 
         frames_dir = target / "frames"
         frame_interval_path = frames_dir / "interval-seconds.txt"
-        effective_frame_interval = frame_interval_seconds
-        if not any(frames_dir.glob("frame-*.jpg")):
+        existing_frames = sorted(frames_dir.glob("frame-*.jpg"))
+        saved_interval: int | None = None
+        if frame_interval_path.is_file():
+            try:
+                saved_interval = int(frame_interval_path.read_text(encoding="ascii").strip())
+            except (OSError, UnicodeError, ValueError):
+                saved_interval = None
+        elif existing_frames:
+            saved_interval = frame_interval_seconds
+            try:
+                atomic_write_text(
+                    frame_interval_path,
+                    str(frame_interval_seconds),
+                    encoding="ascii",
+                )
+            except Exception:
+                pass
+
+        needs_frame_extraction = (
+            not existing_frames
+            or saved_interval is None
+            or saved_interval != frame_interval_seconds
+        )
+
+        if needs_frame_extraction:
             check_cancelled()
+            for f in existing_frames:
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            existing_screen_notes = target / "screen-notes.json"
+            existing_screen_notes.unlink(missing_ok=True)
+
             notify(
                 80,
                 f"Выбираем кадры экрана каждые {frame_interval_seconds} секунд…",
@@ -373,26 +416,18 @@ def prepare_lecture(
                 )
             except (AtomicIOError, OSError) as exc:
                 raise LocalProcessingError("Не удалось сохранить интервал кадров.") from exc
-        frames = sorted(frames_dir.glob("frame-*.jpg"))
+            frames = sorted(frames_dir.glob("frame-*.jpg"))
+        else:
+            frames = existing_frames
+
         frame_count = len(frames)
-        if frame_interval_path.is_file():
-            try:
-                saved_interval = int(frame_interval_path.read_text(encoding="ascii").strip())
-                if saved_interval > 0:
-                    effective_frame_interval = saved_interval
-            except (OSError, UnicodeError, ValueError):
-                pass
-        elif frames:
-            # Builds before interval metadata used the historical 30-second default.
-            effective_frame_interval = 30
+        effective_frame_interval = frame_interval_seconds
 
         existing_screen_notes = target / "screen-notes.json"
         can_reuse_ocr = False
         if _screen_notes_cache_is_valid(existing_screen_notes):
-            if manifest_path.is_file():
+            if manifest_path.is_file() and manifest_was_present:
                 can_reuse_ocr = manifest.is_stage_valid("ocr", ocr_fp, target)
-            else:
-                can_reuse_ocr = True
 
         if can_reuse_ocr:
             screen_notes_path = existing_screen_notes
@@ -475,6 +510,7 @@ def faster_whisper_transcribe(
     model_name: str,
     model_factory: Callable[..., object] | None = None,
     progress: ProgressCallback | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> LocalTranscriber:
     """Build a CPU-friendly Faster-Whisper transcriber only when it is needed."""
 
@@ -488,6 +524,8 @@ def faster_whisper_transcribe(
         model_factory = WhisperModel
 
     notify = progress or _do_nothing
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
     notify(41, f"Загружаем локальную модель Whisper {model_name}…")
     try:
         model = model_factory(model_name, device="cpu", compute_type="int8")
@@ -500,6 +538,8 @@ def faster_whisper_transcribe(
     notify(43, "Модель Whisper готова. Начинаем распознавание речи…")
 
     def transcribe(audio_path: Path, language: str | None) -> Iterable[TranscriptSegment]:
+        if cancellation_token is not None:
+            cancellation_token.check_cancelled()
         try:
             raw_segments, info = model.transcribe(
                 str(audio_path),
@@ -510,6 +550,8 @@ def faster_whisper_transcribe(
             converted: list[TranscriptSegment] = []
             last_percent = 43
             for segment_index, segment in enumerate(raw_segments, start=1):
+                if cancellation_token is not None:
+                    cancellation_token.check_cancelled()
                 end_seconds = float(segment.end)
                 if duration > 0:
                     ratio = min(max(end_seconds / duration, 0), 1)
@@ -535,7 +577,7 @@ def faster_whisper_transcribe(
                     )
             notify(61, f"Речь распознана: фрагментов {len(converted)}.")
             return tuple(converted)
-        except LocalProcessingError:
+        except (LocalProcessingError, JobCancelledError):
             raise
         except subprocess.TimeoutExpired as exc:
             raise LocalProcessingError(

@@ -51,6 +51,39 @@ class DeepSeekHandoffTests(unittest.TestCase):
             with self.assertRaises(DeepSeekHandoffError):
                 prepare_deepseek_handoff(self.recording, directory=Path(temporary))
 
+    def test_prepare_handoff_rejects_sensitive_path_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "lesson-context.md").write_text(
+                "Leaked /Users/private/data.txt", encoding="utf-8"
+            )
+            (directory / "lesson-prompt.md").write_text("Prompt", encoding="utf-8")
+
+            with self.assertRaises(DeepSeekHandoffError):
+                prepare_deepseek_handoff(self.recording, directory=directory)
+
+    def test_launch_handoff_validates_outbound_context_immediately_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            context_file = directory / "lesson-context.md"
+            prompt_file = directory / "lesson-prompt.md"
+            context_file.write_text("Clean context", encoding="utf-8")
+            prompt_file.write_text("Clean prompt", encoding="utf-8")
+
+            handoff = prepare_deepseek_handoff(self.recording, directory=directory)
+
+            # Alter file after prepare to inject secret
+            context_file.write_text("Secret: ghp_123456789012345678901234567890", encoding="utf-8")
+
+            opened_urls: list[str] = []
+            with self.assertRaises(DeepSeekHandoffError):
+                launch_deepseek_handoff(
+                    handoff,
+                    open_url=lambda url: opened_urls.append(url) or True,
+                    recording=self.recording,
+                )
+            self.assertEqual(opened_urls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

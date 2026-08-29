@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime, tzinfo
+import os
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from xml.etree import ElementTree
 
 import requests
 
-from .atomic_io import AtomicIOError, atomic_write_json
 from .bbb_download import RecordingInfo, parse_playback_url
-from .lecture_manifest import compute_lecture_id
-
-LIBRARY_SCHEMA_VERSION = 1
 
 
 class BBBImportError(RuntimeError):
@@ -43,10 +40,6 @@ class BBBRecording:
     audio_video_url: str
     screen_video_url: str | None
     slides: tuple[SlideInfo, ...]
-    # Persisted identity, independent of mutable import timestamps or titles.
-    # ``None`` is accepted for backwards-compatible reads of legacy libraries;
-    # save_to_library() fills it deterministically.
-    lecture_id: str | None = None
 
     @property
     def has_screen_share(self) -> bool:
@@ -60,39 +53,15 @@ class BBBRecording:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> BBBRecording:
-        if not isinstance(payload, dict):
-            raise ValueError("Данные записи должны быть словарём.")
-        meeting_id = str(payload.get("meeting_id", "")).strip()
-        source_url = str(payload.get("source_url", "")).strip()
-        title = str(payload.get("title", "")).strip()
-        imported_at = str(payload.get("imported_at", "")).strip()
-        audio_video_url = str(payload.get("audio_video_url", "")).strip()
-        if not (meeting_id and source_url and title and imported_at and audio_video_url):
-            raise ValueError("Запись не содержит обязательных полей.")
-        raw_slides = payload.get("slides")
-        slides: list[SlideInfo] = []
-        if isinstance(raw_slides, (list, tuple)):
-            for item in raw_slides:
-                if isinstance(item, dict):
-                    ident = str(item.get("identifier", "")).strip() or "slide"
-                    text = str(item.get("text", ""))
-                    img = item.get("image_url")
-                    slides.append(
-                        SlideInfo(identifier=ident, text=text, image_url=str(img) if img else None)
-                    )
+    def from_dict(cls, payload: dict[str, Any]) -> "BBBRecording":
         return cls(
-            meeting_id=meeting_id,
-            source_url=source_url,
-            title=title,
-            imported_at=imported_at,
-            audio_video_url=audio_video_url,
+            meeting_id=str(payload["meeting_id"]),
+            source_url=str(payload["source_url"]),
+            title=str(payload["title"]),
+            imported_at=str(payload["imported_at"]),
+            audio_video_url=str(payload["audio_video_url"]),
             screen_video_url=payload.get("screen_video_url"),
-            slides=tuple(slides),
-            lecture_id=(
-                str(payload.get("lecture_id", "")).strip()
-                or compute_lecture_id(source_url, meeting_id)
-            ),
+            slides=tuple(SlideInfo(**slide) for slide in payload.get("slides", [])),
         )
 
 
@@ -105,7 +74,11 @@ def inspect_bbb_recording(
     *,
     session: requests.Session | Any | None = None,
 ) -> BBBRecording:
-    """Find the playback assets that can later be used to build a lesson."""
+    """Find the playback assets that can later be used to build a lesson.
+
+    This only checks small metadata documents and HTTP headers. It never starts
+    a multi-gigabyte download of the lecture media.
+    """
 
     try:
         info = parse_playback_url(playback_url.strip())
@@ -141,171 +114,40 @@ def inspect_bbb_recording(
 
 
 def load_library(path: Path | None = None) -> list[BBBRecording]:
-    """Return locally saved recordings, newest first, quarantining corrupt rows."""
-
-    recordings, _ = load_library_with_quarantine(path)
-    return recordings
-
-
-def load_library_with_quarantine(
-    path: Path | None = None,
-) -> tuple[list[BBBRecording], Path | None]:
-    """Load library and quarantine corrupted entries if any exist."""
+    """Return locally saved recordings, newest first."""
 
     library_path = path or default_library_path()
     if not library_path.is_file():
-        return [], None
-
+        return []
     try:
-        raw_text = library_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        payload = json.loads(library_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
         raise BBBImportError("Не удалось прочитать локальную библиотеку лекций.") from exc
 
-    if not raw_text.strip():
-        return [], None
-
-    try:
-        payload = json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        quarantine_path = _quarantine_backup(library_path, raw_text)
-        raise BBBImportError(
-            f"Файл библиотеки повреждён. Резервная копия сохранена: {quarantine_path.name if quarantine_path else 'не удалось записать'}"
-        ) from exc
-
-    raw_recordings: list[Any]
-    if isinstance(payload, dict):
-        raw_recordings = payload.get("recordings", [])
-        if not isinstance(raw_recordings, list):
-            quarantine_path = _quarantine_backup(library_path, raw_text)
-            return [], quarantine_path
-    elif isinstance(payload, list):
-        raw_recordings = payload
-    else:
-        quarantine_path = _quarantine_backup(library_path, raw_text)
-        return [], quarantine_path
-
-    valid_recordings: list[BBBRecording] = []
-    has_malformed = False
-
-    for item in raw_recordings:
-        try:
-            recording = BBBRecording.from_dict(item)
-            valid_recordings.append(recording)
-        except (TypeError, ValueError, KeyError):
-            has_malformed = True
-
-    quarantine_path: Path | None = None
-    needs_identity_migration = any(
-        isinstance(item, dict) and not str(item.get("lecture_id", "")).strip()
-        for item in raw_recordings
-    )
-    if has_malformed or needs_identity_migration:
-        if has_malformed:
-            quarantine_path = _quarantine_backup(library_path, raw_text)
-        # Resave the sanitized valid records
-        try:
-            _write_library_file(library_path, valid_recordings)
-        except (AtomicIOError, OSError):
-            pass
-
-    sorted_recordings = sorted(valid_recordings, key=lambda item: item.imported_at, reverse=True)
-    return sorted_recordings, quarantine_path
+    recordings = [BBBRecording.from_dict(item) for item in payload]
+    return sorted(recordings, key=lambda item: item.imported_at, reverse=True)
 
 
 def save_to_library(recording: BBBRecording, path: Path | None = None) -> None:
-    """Persist one recording atomically, replacing only the same recording from the same BBB."""
+    """Persist one imported recording and replace an older copy of the same BBB id."""
 
     library_path = path or default_library_path()
-    persisted = recording
-    if not recording.lecture_id:
-        persisted = replace(
-            recording, lecture_id=compute_lecture_id(recording.source_url, recording.meeting_id)
-        )
     existing = load_library(library_path)
-    identity = recording_identity(persisted)
-    updated = [item for item in existing if recording_identity(item) != identity]
-    updated.insert(0, persisted)
+    updated = [item for item in existing if item.meeting_id != recording.meeting_id]
+    updated.insert(0, recording)
 
-    _write_library_file(library_path, updated)
-
-
-def _write_library_file(library_path: Path, recordings: list[BBBRecording]) -> None:
-    persisted_recordings = [
-        item
-        if item.lecture_id
-        else replace(item, lecture_id=compute_lecture_id(item.source_url, item.meeting_id))
-        for item in recordings
-    ]
-    payload = {
-        "schema_version": LIBRARY_SCHEMA_VERSION,
-        "recordings": [item.to_dict() for item in persisted_recordings],
-    }
-    try:
-        atomic_write_json(library_path, payload, ensure_ascii=False, indent=2)
-    except (AtomicIOError, OSError) as exc:
-        raise BBBImportError(f"Не удалось сохранить библиотеку лекций: {exc}") from exc
-
-
-def save_library(recordings: list[BBBRecording], path: Path | None = None) -> None:
-    """Save a list of recordings atomically to library.json."""
-    library_path = path or default_library_path()
-    _write_library_file(library_path, recordings)
-
-
-def _quarantine_backup(library_path: Path, content: str) -> Path | None:
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    backup_path = library_path.with_name(f"library-corrupt-{timestamp}.json")
-    try:
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
-        backup_path.write_text(content, encoding="utf-8")
-        return backup_path
-    except OSError:
-        return None
+    library_path.parent.mkdir(parents=True, exist_ok=True)
+    library_path.write_text(
+        json.dumps([item.to_dict() for item in updated], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def default_library_path() -> Path:
-    """Keep study metadata in the platform application-data directory."""
-    from .platform_services import PlatformAppPaths
+    """Keep study metadata in the user's local application-data directory."""
 
-    return PlatformAppPaths().data_dir / "library.json"
-
-
-def recording_identity(recording: BBBRecording) -> tuple[str, str]:
-    """Identify a recording within its BBB server, not across unrelated hosts."""
-
-    return (_source_origin(recording.source_url), recording.meeting_id)
-
-
-def _source_origin(source_url: str) -> str:
-    parsed = urlparse(source_url.strip())
-    host = (parsed.hostname or "").casefold()
-    if not host:
-        return source_url.strip().casefold()
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
-    scheme = parsed.scheme.casefold()
-    prefix = f"{scheme}://" if scheme else ""
-    if port and port not in {80, 443}:
-        host = f"{host}:{port}"
-    return f"{prefix}{host}"
-
-
-def format_imported_at(value: str, *, timezone: tzinfo | None = None) -> str:
-    """Format a stored UTC timestamp in the user's local timezone."""
-
-    try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except (AttributeError, TypeError, ValueError):
-        return "Дата добавления неизвестна"
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    try:
-        local = parsed.astimezone(timezone)
-    except (OSError, OverflowError, ValueError):
-        return "Дата добавления неизвестна"
-    return f"Добавлено {local:%d.%m.%Y, %H:%M}"
+    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return base / "Konspekt" / "library.json"
 
 
 def _asset_url(info: RecordingInfo, relative_path: str) -> str:

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from konspekt.bbb_import import load_library
+from konspekt.library_manager import load_library
 from konspekt.workflow import resolve_lecture_state
 
 

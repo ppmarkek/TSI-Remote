@@ -41,18 +41,62 @@ class OutboundConsentSummary:
 
 
 _FORBIDDEN_PATH_PATTERN = re.compile(
-    r"(?:/(?:Users|home|AppData|System|Library|var|tmp|private)[/\\][^\s]+|[A-Za-z]:\\[^\s]+)"
+    r"(?:(?:\\\\|//)[A-Za-z0-9_.-]+[/\\][^\s\"'>)]+|[A-Za-z]:[/\\][^\s\"'>)]+|"
+    r"/(?:Users|home|AppData|System|Library|var|tmp|private|etc|opt|usr|bin|root|mnt|media|Volumes|Applications|data|build|temp|scratch|local)[/\\][^\s\"'>)]+|"
+    r"/(?:[a-zA-Z0-9._-]+/){2,}[^\s\"'>)]*)",
+    re.IGNORECASE,
 )
 _FORBIDDEN_SECRET_PATTERN = re.compile(
-    r"(?:sk-[A-Za-z0-9_-]{10,}|Bearer\s+[A-Za-z0-9_.-]+|SECRET-[^\s]+|"
-    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|token)\s*=\s*[^\s&]+)",
+    r"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{22,}|"
+    r"(?:AKIA|ASIA)[0-9A-Z]{16}|aws_secret_access_key\s*[:=]\s*[^\s&,\"']+|"
+    r"sk-[A-Za-z0-9_-]{10,}|sk-ant-[A-Za-z0-9_-]{10,}|"
+    r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]+|"
+    r"Bearer\s+[A-Za-z0-9_.-]+|SECRET-[^\s]+|"
+    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|token|auth[_-]?token)\s*[:=]\s*[^\s&,\"']+|"
+    r"(?:[?&])(?:token|secret|key|access_token|api_key)=[^\s&]+|token=DO_NOT_SEND)",
     re.IGNORECASE,
 )
 _FORBIDDEN_URL_PATTERN = re.compile(
-    r"(?:\b[a-z][a-z0-9+.-]{1,31}://[^\s]+|\b(?:meetingId|meeting_id)\s*=\s*[^\s&]+|\?[^\s]+)",
+    r"(?:\b[a-z][a-z0-9+.-]{1,31}://[^\s\"'>)]+|\b(?:meetingId|meeting_id)\s*[:=]\s*[^\s&,\"']+|"
+    r"\?[^\s\"'>)]*(?:meetingId|meeting_id|token|secret|key)=[^\s\"'>)]*)",
     re.IGNORECASE,
 )
-_FORBIDDEN_IDENTIFIER_PATTERN = re.compile(r"\b(?:[A-Za-z0-9_-]{24,}-\d{6,}|[A-Fa-f0-9]{24,})\b")
+_FORBIDDEN_IDENTIFIER_PATTERN = re.compile(
+    r"\b(?:[A-Za-z0-9_-]{20,}-\d{4,}|[A-Fa-f0-9]{24,}|secret-meeting-[^\s\"'>)]+|meeting_[a-zA-Z0-9_-]+|"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b",
+    re.IGNORECASE,
+)
+
+PROVIDER_CONTEXT_LIMITS: dict[str, dict[str, int]] = {
+    "openai": {"max_chars": 400_000, "max_bytes": 1_000_000},
+    "deepseek": {"max_chars": 250_000, "max_bytes": 600_000},
+    "chatgpt": {"max_chars": 400_000, "max_bytes": 1_000_000},
+    "deepseek_web": {"max_chars": 200_000, "max_bytes": 500_000},
+}
+
+
+def validate_provider_context_limits(
+    provider: str,
+    character_count: int,
+    size_bytes: int,
+) -> None:
+    """Ensure context payload does not exceed provider-specific safe bounds."""
+    key = provider.strip().lower().replace(" ", "_")
+    limits = PROVIDER_CONTEXT_LIMITS.get(key)
+    if not limits:
+        limits = {"max_chars": 400_000, "max_bytes": 1_000_000}
+
+    max_chars = limits["max_chars"]
+    max_bytes = limits["max_bytes"]
+
+    if character_count > max_chars or size_bytes > max_bytes:
+        size_kb = max(1, size_bytes // 1024)
+        max_kb = max_bytes // 1024
+        raise OutboundContextError(
+            f"Размер контекста ({character_count:,} символов, ~{size_kb} КБ) "
+            f"превышает допустимый лимит для {provider} ({max_chars:,} символов, ~{max_kb} КБ). "
+            f"Уменьши длительность лекции или отключи OCR для сокращения объёма."
+        )
 
 
 @dataclass(frozen=True)
@@ -338,6 +382,9 @@ def _validate_outbound_text(
 
     if _FORBIDDEN_URL_PATTERN.search(text):
         raise OutboundContextError(f"Обнаружен URL или ссылка на запись в поле {field_name}.")
+
+    if _FORBIDDEN_IDENTIFIER_PATTERN.search(text):
+        raise OutboundContextError(f"Обнаружен идентификатор или UUID в поле {field_name}.")
 
 
 def _render_lesson_prompt(title: str) -> str:

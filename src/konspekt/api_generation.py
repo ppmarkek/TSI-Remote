@@ -10,9 +10,14 @@ from typing import Any
 import requests
 
 from .bbb_import import BBBRecording
+from .job_runner import CancellationToken, JobCancelledError
 from .lesson_output import SavedLesson, save_generated_lesson
 from .local_pipeline import default_lecture_directory
-from .outbound_context import OutboundContextError, _validate_outbound_text
+from .outbound_context import (
+    OutboundContextError,
+    _validate_outbound_text,
+    validate_provider_context_limits,
+)
 from .settings import AppSettings
 
 ProgressCallback = Callable[[int, str], None]
@@ -36,8 +41,12 @@ def generate_lesson_via_api(
     directory: Path | None = None,
     progress: ProgressCallback | None = None,
     session: Any | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> ApiLessonResult:
     """Send only the prepared text context and save the returned Markdown."""
+
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
 
     if not settings.api_configured:
         raise ApiGenerationError("Сначала добавь API-ключ и модель в настройках.")
@@ -60,6 +69,9 @@ def generate_lesson_via_api(
         forbidden = [recording.meeting_id, recording.source_url]
         _validate_outbound_text("api_context", context, forbidden)
         _validate_outbound_text("api_prompt", prompt, forbidden)
+        total_chars = len(prompt) + len(context)
+        total_bytes = len(prompt.encode("utf-8")) + len(context.encode("utf-8"))
+        validate_provider_context_limits(settings.api_provider, total_chars, total_bytes)
     except OutboundContextError as exc:
         raise ApiGenerationError(
             f"Ошибка проверки безопасности передаваемых данных: {exc}"
@@ -76,12 +88,18 @@ def generate_lesson_via_api(
     else:
         raise ApiGenerationError("Выбран неподдерживаемый API-провайдер.")
 
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
+
     notify(
         24,
         f"Отправляем только текстовый контекст в {settings.provider_label}…",
     )
     owns_client = session is None
     client = session or requests.Session()
+    if cancellation_token is not None:
+        cancellation_token.register(lambda: client.close())
+
     response: Any | None = None
     try:
         response = client.post(
@@ -96,16 +114,22 @@ def generate_lesson_via_api(
     except requests.Timeout as exc:
         if owns_client:
             client.close()
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            raise JobCancelledError("Операция была отменена пользователем.") from exc
         raise ApiGenerationError(
             "API слишком долго не отвечает. Повтори запрос: локальные материалы сохранены."
         ) from exc
-    except requests.RequestException as exc:
+    except (requests.RequestException, OSError) as exc:
         if owns_client:
             client.close()
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            raise JobCancelledError("Операция была отменена пользователем.") from exc
         raise ApiGenerationError(
             "Не удалось подключиться к API. Проверь интернет и повтори запрос."
         ) from exc
     try:
+        if cancellation_token is not None:
+            cancellation_token.check_cancelled()
         if response.status_code >= 400:
             raise _http_error(response.status_code, _response_json_or_empty(response))
         body = _response_json(response)
@@ -118,6 +142,9 @@ def generate_lesson_via_api(
         markdown = _clean_markdown(markdown)
         if not markdown:
             raise ApiGenerationError("API вернул пустой ответ. Локальные материалы не изменены.")
+
+        if cancellation_token is not None:
+            cancellation_token.check_cancelled()
 
         saved = save_generated_lesson(recording, markdown, directory=target)
         notify(100, "Конспект создан и сохранён локально.")

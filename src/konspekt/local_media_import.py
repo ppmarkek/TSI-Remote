@@ -6,8 +6,9 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .bbb_import import BBBRecording, save_to_library
-from .lecture_manifest import LectureManifest, compute_lecture_id, file_sha256
+from .bbb_import import BBBRecording
+from .lecture_manifest import LectureManifest, file_sha256
+from .library_manager import save_to_library
 from .local_pipeline import default_lecture_directory
 
 SUPPORTED_MEDIA_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav", ".mkv", ".webm", ".aac"}
@@ -37,11 +38,12 @@ def import_local_media_file(
     # Compute content hash for stable ID
     content_hash = file_sha256(media_path)[:16]
     meeting_id = f"local-{content_hash}"
+    source_url = f"local://media-{content_hash}"
     title = custom_title.strip() if custom_title and custom_title.strip() else media_path.stem
 
     recording = BBBRecording(
         meeting_id=meeting_id,
-        source_url=f"local://{media_path.name}",
+        source_url=source_url,
         title=title,
         imported_at=datetime.now(timezone.utc).isoformat(),
         # The source is represented relative to the lecture directory.  The
@@ -50,7 +52,6 @@ def import_local_media_file(
         audio_video_url="local://audio.mp4",
         screen_video_url=None,
         slides=(),
-        lecture_id=compute_lecture_id(f"local://{media_path.name}", meeting_id),
     )
 
     resolved_library_path = library_path or (base_dir / "library.json" if base_dir else None)

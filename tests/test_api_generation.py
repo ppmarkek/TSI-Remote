@@ -233,6 +233,24 @@ class ApiGenerationTests(unittest.TestCase):
 
         self.assertIn("API", str(raised.exception))
 
+    def test_respects_cancellation_token(self) -> None:
+        from konspekt.job_runner import CancellationToken, JobCancelledError
+
+        token = CancellationToken()
+        token.cancel()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self._write_context(directory)
+
+            with self.assertRaises(JobCancelledError):
+                generate_lesson_via_api(
+                    self.recording,
+                    self.settings,
+                    directory=directory,
+                    cancellation_token=token,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

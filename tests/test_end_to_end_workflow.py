@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from konspekt.bbb_import import BBBRecording, save_library
+from konspekt.bbb_import import BBBRecording
 from konspekt.context_package import build_context_package
 from konspekt.lesson_output import save_lesson_markdown
+from konspekt.library_manager import save_library
 from konspekt.outbound_context import build_outbound_context
 from konspekt.workflow import (
     LectureState,

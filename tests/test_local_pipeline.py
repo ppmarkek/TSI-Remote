@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from konspekt.bbb_import import BBBRecording, save_to_library
+from konspekt.bbb_import import BBBRecording
+from konspekt.lecture_manifest import ALGORITHM_VERSION, LectureManifest, file_sha256
+from konspekt.library_manager import save_to_library
 from konspekt.local_pipeline import (
     LocalProcessingError,
     TranscriptSegment,
@@ -15,6 +17,29 @@ from konspekt.local_pipeline import (
     faster_whisper_transcribe,
     prepare_lecture,
 )
+
+
+def _save_transcription_manifest(target: Path, recording: BBBRecording) -> None:
+    manifest = LectureManifest.for_recording(
+        recording.title, recording.meeting_id, recording.source_url, target
+    )
+    audio_wav = target / "audio.wav"
+    tr_md = target / "transcript.md"
+    tr_json = target / "transcript.json"
+    manifest.record_stage_success(
+        "transcription",
+        fingerprint={
+            "whisper_model": "base",
+            "language": "auto",
+            "algorithm_version": ALGORITHM_VERSION,
+            "input_audio_sha256": file_sha256(audio_wav) if audio_wav.is_file() else "",
+        },
+        outputs={
+            "transcript.md": file_sha256(tr_md) if tr_md.is_file() else "",
+            "transcript.json": file_sha256(tr_json) if tr_json.is_file() else "",
+        },
+    )
+    manifest.save(target / "lecture-manifest.json")
 
 
 class LocalPipelineTests(unittest.TestCase):
@@ -259,6 +284,7 @@ class LocalPipelineTests(unittest.TestCase):
                 "# Transcript\n\nAlready prepared.\n",
                 encoding="utf-8",
             )
+            _save_transcription_manifest(target, recording)
 
             with patch("konspekt.local_pipeline.resolve_ffmpeg", return_value="ffmpeg"):
                 prepared = prepare_lecture(
@@ -304,6 +330,7 @@ class LocalPipelineTests(unittest.TestCase):
             (target / "audio.wav").write_bytes(b"audio")
             (target / "transcript.json").write_text("[]", encoding="utf-8")
             (target / "transcript.md").write_text("# Transcript\n", encoding="utf-8")
+            _save_transcription_manifest(target, recording)
             (target / "deskshare.webm").write_bytes(b"screen")
             frames = target / "frames"
             frames.mkdir()
@@ -383,6 +410,7 @@ class LocalPipelineTests(unittest.TestCase):
             (target / "audio.wav").write_bytes(b"audio")
             (target / "transcript.json").write_text("[]", encoding="utf-8")
             (target / "transcript.md").write_text("# Transcript\n", encoding="utf-8")
+            _save_transcription_manifest(target, recording)
             (target / "deskshare.webm").write_bytes(b"screen")
             frames = target / "frames"
             frames.mkdir()
@@ -402,6 +430,59 @@ class LocalPipelineTests(unittest.TestCase):
                 )
 
             self.assertFalse((target / "screen-notes.json").exists())
+
+    def test_frame_interval_change_invalidates_stale_frames(self) -> None:
+        recording = BBBRecording(
+            meeting_id="meeting-interval-change",
+            source_url="https://example.test/playback?meetingId=meeting-interval-change",
+            title="Interval lecture",
+            imported_at="2026-07-15T10:00:00+00:00",
+            audio_video_url="https://example.test/video/webcams.webm",
+            screen_video_url="https://example.test/deskshare/deskshare.webm",
+            slides=(),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            (target / "webcams.webm").write_bytes(b"media")
+            (target / "audio.wav").write_bytes(b"audio")
+            (target / "transcript.json").write_text("[]", encoding="utf-8")
+            (target / "transcript.md").write_text("# Transcript\n", encoding="utf-8")
+            _save_transcription_manifest(target, recording)
+            (target / "deskshare.webm").write_bytes(b"screen")
+
+            extracted_intervals: list[int] = []
+
+            def run_ffmpeg(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                output = Path(command[-1])
+                if "frame-%04d.jpg" in str(output):
+                    for arg in command:
+                        if arg.startswith("fps=1/"):
+                            extracted_intervals.append(int(arg.split("/")[1]))
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    (output.parent / "frame-0001.jpg").write_bytes(b"frame1")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("konspekt.local_pipeline.resolve_ffmpeg", return_value="ffmpeg"):
+                # First run with interval 20
+                prepare_lecture(
+                    recording,
+                    directory=target,
+                    frame_interval_seconds=20,
+                    command_runner=run_ffmpeg,
+                    ocr_reader=lambda _: "Note 20",
+                )
+                self.assertEqual(extracted_intervals, [20])
+
+                # Second run with interval 10 should invalidate old frames and re-run ffmpeg
+                prepare_lecture(
+                    recording,
+                    directory=target,
+                    frame_interval_seconds=10,
+                    command_runner=run_ffmpeg,
+                    ocr_reader=lambda _: "Note 10",
+                )
+                self.assertEqual(extracted_intervals, [20, 10])
 
 
 if __name__ == "__main__":

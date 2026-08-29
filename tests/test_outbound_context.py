@@ -152,6 +152,61 @@ class OutboundContextTests(unittest.TestCase):
                 "Path Lecture",
                 slides=(SlideInfo("s1", "Files stored in /Users/teacher/Documents/private"),),
             )
+        with self.assertRaises(OutboundContextError):
+            build_outbound_context(
+                "Windows Path",
+                slides=(SlideInfo("s1", r"Files stored in C:\Users\teacher\Documents"),),
+            )
+        with self.assertRaises(OutboundContextError):
+            build_outbound_context(
+                "UNC Path 1",
+                slides=(SlideInfo("s1", r"\\server\share\file.txt"),),
+            )
+        with self.assertRaises(OutboundContextError):
+            build_outbound_context(
+                "UNC Path 2",
+                slides=(SlideInfo("s1", r"//fileserver/data/folder"),),
+            )
+
+    def test_rejects_git_tokens_and_cloud_credentials(self) -> None:
+        with self.assertRaises(OutboundContextError):
+            build_outbound_context(
+                "GitHub Token",
+                slides=(SlideInfo("s1", "Token: ghp_123456789012345678901234567890123456"),),
+            )
+        with self.assertRaises(OutboundContextError):
+            build_outbound_context(
+                "AWS Key",
+                slides=(SlideInfo("s1", "Key: AKIAIOSFODNN7EXAMPLE"),),
+            )
+
+    def test_rejects_uuid_and_meeting_identifiers(self) -> None:
+        with self.assertRaises(OutboundContextError):
+            build_outbound_context(
+                "UUID Lecture",
+                slides=(SlideInfo("s1", "UUID: 12345678-1234-1234-1234-123456789abc"),),
+            )
+        with self.assertRaises(OutboundContextError):
+            build_outbound_context(
+                "Meeting Leak",
+                slides=(SlideInfo("s1", "meetingId=secret-meeting-room-999"),),
+            )
+
+    def test_validate_provider_context_limits(self) -> None:
+        from konspekt.outbound_context import validate_provider_context_limits
+
+        # Normal limits should pass
+        validate_provider_context_limits("chatgpt", character_count=5000, size_bytes=6000)
+        validate_provider_context_limits("deepseek", character_count=5000, size_bytes=6000)
+        validate_provider_context_limits("openrouter", character_count=5000, size_bytes=6000)
+
+        # Excessively large context should raise OutboundContextError
+        with self.assertRaises(OutboundContextError):
+            validate_provider_context_limits("deepseek", character_count=300000, size_bytes=500000)
+        with self.assertRaises(OutboundContextError):
+            validate_provider_context_limits(
+                "chatgpt", character_count=1000, size_bytes=20 * 1024 * 1024
+            )
 
     def test_identical_sanitization_in_context_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

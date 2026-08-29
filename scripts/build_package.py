@@ -49,7 +49,30 @@ def main() -> int:
         app_bundle = dist_dir / "Konspekt.app"
         if app_bundle.is_dir():
             print(f"Successfully built macOS bundle: {app_bundle}")
-            return 0
+            dmg_path = dist_dir / "Konspekt.dmg"
+            dmg_path.unlink(missing_ok=True)
+            print("Creating macOS DMG installer...")
+            dmg_cmd = [
+                "hdiutil",
+                "create",
+                "-volname",
+                "Konspekt",
+                "-srcfolder",
+                str(app_bundle),
+                "-ov",
+                "-format",
+                "UDZO",
+                str(dmg_path),
+            ]
+            dmg_proc = subprocess.run(dmg_cmd, capture_output=True, text=True, check=False)
+            if dmg_proc.returncode == 0 and dmg_path.is_file():
+                print(f"Successfully created macOS DMG: {dmg_path}")
+                return 0
+            print(
+                f"Error: Failed to create macOS DMG (exit code {dmg_proc.returncode}): {dmg_proc.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return dmg_proc.returncode if dmg_proc.returncode != 0 else 1
     elif sys.platform == "win32":
         exe_file = dist_dir / "Konspekt" / "Konspekt.exe"
         if exe_file.is_file():

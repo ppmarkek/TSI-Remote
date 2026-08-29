@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from konspekt.bbb_import import load_library
+from konspekt.library_manager import load_library
 from konspekt.local_media_import import (
     LocalMediaImportError,
     import_local_media_file,
@@ -27,7 +27,8 @@ class LocalMediaImportTests(unittest.TestCase):
 
             self.assertTrue(recording.meeting_id.startswith("local-"))
             self.assertEqual(recording.title, "Custom Local Lecture")
-            self.assertEqual(recording.source_url, "local://lecture_recording.mp3")
+            self.assertTrue(recording.source_url.startswith("local://media-"))
+            self.assertEqual(recording.source_url, f"local://media-{recording.meeting_id[6:]}")
 
             # Check files and manifest in directory
             self.assertTrue((lec_dir / "audio.mp4").is_file())

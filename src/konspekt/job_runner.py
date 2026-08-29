@@ -151,7 +151,7 @@ class JobRunner:
                     if cancellation_token in self._active_tokens:
                         self._active_tokens.remove(cancellation_token)
 
-        thread = threading.Thread(target=worker, daemon=False, name="konspekt-job")
+        thread = threading.Thread(target=worker, daemon=True, name="konspekt-job")
         with self._lock:
             self._active_threads.append(thread)
             self._active_tokens.append(cancellation_token)

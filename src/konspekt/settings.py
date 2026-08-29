@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .atomic_io import AtomicIOError, atomic_write_json
-from .bbb_import import default_library_path
+from .library_manager import default_library_path
 from .platform_services import KeyringSecretStore, SecretStore, SecretStoreError
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
@@ -99,21 +99,19 @@ def load_settings(
             decrypted = _unprotect_secret(protected_key)
             if decrypted:
                 api_key = decrypted
+                try:
+                    store.set_secret(SERVICE_NAME, "api_key", decrypted)
+                except SecretStoreError:
+                    pass
+                payload.pop("api_key_protected", None)
+                try:
+                    atomic_write_json(settings_path, payload, ensure_ascii=False, indent=2)
+                except (AtomicIOError, OSError):
+                    pass
         except SettingsError:
             api_key = ""
 
-    if not api_key and secret_store is not None:
-        try:
-            retrieved = store.get_secret(SERVICE_NAME, "api_key")
-            if retrieved:
-                api_key = retrieved
-        except SecretStoreError as exc:
-            if secret_store is not None:
-                raise SettingsError(
-                    "Не удалось прочитать API-ключ из системного хранилища."
-                ) from exc
-
-    if not api_key and not protected_key:
+    if not api_key:
         try:
             retrieved = store.get_secret(SERVICE_NAME, "api_key")
             if retrieved:
@@ -147,36 +145,20 @@ def save_settings(
     settings_path = path or default_settings_path()
     payload: dict[str, Any] = asdict(validated)
     api_key = str(payload.pop("api_key", "")).strip()
+    payload.pop("api_key_protected", None)
     payload["schema_version"] = 1
 
     store = secret_store or KeyringSecretStore()
-    secret_store_error: SecretStoreError | None = None
     try:
         if api_key:
             store.set_secret(SERVICE_NAME, "api_key", api_key)
         else:
             store.delete_secret(SERVICE_NAME, "api_key")
     except SecretStoreError as exc:
-        # An explicitly injected store is always a hard failure (and is how
-        # callers/tests detect a locked keychain).  For the ambient keyring,
-        # continue only if a protected fallback can be written below.
-        if secret_store is not None:
-            raise SettingsError(
-                "Не удалось сохранить API-ключ в системном хранилище. "
-                "Разблокируй Keychain/Credential Manager и повтори попытку."
-            ) from exc
-        secret_store_error = exc
-
-    try:
-        payload["api_key_protected"] = _protect_secret(api_key) if api_key else ""
-    except SettingsError:
-        payload["api_key_protected"] = ""
-
-    if secret_store_error is not None and api_key and not payload["api_key_protected"]:
         raise SettingsError(
             "Не удалось сохранить API-ключ в системном хранилище. "
             "Разблокируй Keychain/Credential Manager и повтори попытку."
-        ) from secret_store_error
+        ) from exc
 
     try:
         atomic_write_json(settings_path, payload, ensure_ascii=False, indent=2)

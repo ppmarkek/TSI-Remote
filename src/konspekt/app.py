@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows interface for importing and preparing local lecture-study materials."""
+"""Quiet archive desktop interface for importing and preparing lecture materials."""
 
 from __future__ import annotations
 
@@ -19,10 +19,7 @@ from .api_generation import (
 from .bbb_import import (
     BBBImportError,
     BBBRecording,
-    format_imported_at,
     inspect_bbb_recording,
-    load_library,
-    save_to_library,
 )
 from .chatgpt_account import (
     ChatGPTAccountError,
@@ -47,12 +44,7 @@ from .deepseek_handoff import (
     prepare_deepseek_handoff,
 )
 from .diagnostics import record_exception
-from .job_runner import (
-    CancellationToken,
-    JobEvent,
-    JobEventType,
-    JobRunner,
-)
+from .job_runner import CancellationToken, JobEvent, JobEventType, JobRunner
 from .lesson_output import (
     LessonOutputError,
     lesson_is_ready,
@@ -61,12 +53,28 @@ from .lesson_output import (
 )
 from .library_manager import (
     calculate_library_size,
+    empty_trash,
     filter_and_sort_recordings,
+    format_imported_at,
+    list_trash,
+    load_library,
     move_to_trash,
     rename_recording,
+    restore_from_trash,
+    save_to_library,
 )
-from .local_pipeline import LocalProcessingError, lecture_is_prepared, prepare_lecture
+from .local_pipeline import (
+    LocalProcessingError,
+    default_lecture_directory,
+    lecture_is_prepared,
+    prepare_lecture,
+)
 from .markdown_reader import extract_table_of_contents, extract_timestamps
+from .outbound_context import (
+    OutboundContextError,
+    _validate_outbound_text,
+    validate_provider_context_limits,
+)
 from .settings import (
     AppSettings,
     SettingsError,
@@ -76,21 +84,26 @@ from .settings import (
 )
 
 PALETTE = {
-    "canvas": "#FFFFFF",
-    "sidebar": "#F3F6F4",
+    "canvas": "#F4F7F7",
+    "sidebar": "#20292B",
     "surface": "#FFFFFF",
-    "surface_soft": "#F7FAF8",
-    "ink": "#17211D",
-    "muted": "#55635C",
-    "faint": "#7B8981",
-    "line": "#DDE5E0",
-    "primary": "#176B45",
-    "primary_hover": "#105A39",
-    "primary_pressed": "#0B482D",
-    "primary_soft": "#E8F3EC",
-    "focus": "#0D7A4A",
-    "success": "#176B45",
-    "danger": "#A43D31",
+    "surface_soft": "#EAF0F0",
+    "ink": "#172124",
+    "muted": "#4C5C60",
+    "faint": "#718084",
+    "line": "#C9D4D6",
+    "primary": "#0A6570",
+    "primary_hover": "#07535D",
+    "primary_pressed": "#063F47",
+    "primary_soft": "#DDECEE",
+    "focus": "#A2482E",
+    "success": "#2E765A",
+    "danger": "#A54242",
+    "sidebar_ink": "#EAF0F0",
+    "sidebar_muted": "#8A9B9E",
+    "sidebar_active": "#2B373A",
+    "sidebar_hover": "#263133",
+    "sidebar_line": "#2C383A",
 }
 
 
@@ -149,13 +162,15 @@ class Typography:
     family: str
     title: tuple[str, int, str]
     heading: tuple[str, int, str]
+    subheading: tuple[str, int, str]
     body: tuple[str, int]
     body_bold: tuple[str, int, str]
+    secondary: tuple[str, int]
     small: tuple[str, int]
 
 
 class StudyApp(tk.Tk):
-    """A calm desktop shell for managing study lectures."""
+    """A quiet archive desktop study workspace."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -192,8 +207,10 @@ class StudyApp(tk.Tk):
         self.library: list[BBBRecording] = self._load_library_safely()
         self._library_query = tk.StringVar()
         self._library_state_filter = tk.StringVar(value="Все состояния")
+        self._library_date_filter = tk.StringVar(value="Все даты")
         self._library_sort = tk.StringVar(value="Сначала новые")
         self._library_storage_status = tk.StringVar()
+        self._reading_positions: dict[str, float] = {}
         self._bbb_url = tk.StringVar()
         self._import_status = tk.StringVar()
         self._import_button: ttk.Button | None = None
@@ -272,7 +289,9 @@ class StudyApp(tk.Tk):
 
         available = set(font.families())
         pref = PlatformAppearancePreferences().font_family_body
-        if "Segoe UI Variable Text" in available:
+        if sys.platform == "darwin" and "Helvetica Neue" in available:
+            family = "Helvetica Neue"
+        elif "Segoe UI Variable Text" in available:
             family = "Segoe UI Variable Text"
         elif "Segoe UI Variable" in available:
             family = "Segoe UI Variable"
@@ -288,16 +307,19 @@ class StudyApp(tk.Tk):
             family = "TkDefaultFont"
         return Typography(
             family=family,
-            title=(family, 27, "bold"),
-            heading=(family, 18, "bold"),
+            title=(family, 22, "bold"),
+            heading=(family, 14, "bold"),
+            subheading=(family, 11, "bold"),
             body=(family, 11),
             body_bold=(family, 11, "bold"),
-            small=(family, 9),
+            secondary=(family, 10),
+            small=(family, 10),
         )
 
     def _configure_styles(self) -> None:
         self.style.theme_use("clam")
         self.style.configure("TFrame", background=PALETTE["canvas"])
+
         self.style.configure(
             "Primary.TButton",
             background=PALETTE["primary"],
@@ -305,48 +327,77 @@ class StudyApp(tk.Tk):
             borderwidth=0,
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            padding=(18, 11),
+            padding=(16, 9),
         )
         self.style.map(
             "Primary.TButton",
             background=[
-                ("disabled", "#E1E9E4"),
+                ("disabled", "#BDCED0"),
                 ("pressed", PALETTE["primary_pressed"]),
                 ("active", PALETTE["primary_hover"]),
             ],
-            foreground=[("disabled", "#C8D9CF")],
+            foreground=[("disabled", "#7E9698")],
         )
+
         self.style.configure(
             "Secondary.TButton",
             background=PALETTE["surface"],
             foreground=PALETTE["ink"],
             borderwidth=1,
             relief="solid",
+            bordercolor=PALETTE["line"],
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            padding=(16, 10),
+            padding=(14, 8),
         )
         self.style.map(
             "Secondary.TButton",
             background=[
-                ("disabled", "#F4F7F5"),
+                ("disabled", PALETTE["canvas"]),
                 ("active", PALETTE["surface_soft"]),
             ],
             foreground=[("disabled", PALETTE["faint"])],
+            bordercolor=[("disabled", PALETTE["line"])],
         )
+
         self.style.configure(
             "Nav.TButton",
             background=PALETTE["sidebar"],
-            foreground=PALETTE["ink"],
+            foreground=PALETTE["sidebar_ink"],
             borderwidth=0,
-            font=self.type.body_bold,
+            font=self.type.body,
             anchor="w",
-            padding=(14, 10),
+            padding=(12, 9),
         )
         self.style.map(
             "Nav.TButton",
-            background=[("active", PALETTE["primary_soft"])],
+            background=[
+                ("selected", PALETTE["sidebar_active"]),
+                ("active", PALETTE["sidebar_hover"]),
+            ],
+            foreground=[("active", "#FFFFFF"), ("disabled", PALETTE["sidebar_muted"])],
         )
+
+        self.style.configure(
+            "SidebarPrimary.TButton",
+            background=PALETTE["primary"],
+            foreground="#FFFFFF",
+            borderwidth=0,
+            focuscolor=PALETTE["focus"],
+            font=self.type.body_bold,
+            anchor="w",
+            padding=(12, 9),
+        )
+        self.style.map(
+            "SidebarPrimary.TButton",
+            background=[
+                ("disabled", "#2C383A"),
+                ("pressed", PALETTE["primary_pressed"]),
+                ("active", PALETTE["primary_hover"]),
+            ],
+            foreground=[("disabled", PALETTE["sidebar_muted"])],
+        )
+
         self.style.configure(
             "Source.TEntry",
             fieldbackground=PALETTE["surface"],
@@ -355,58 +406,64 @@ class StudyApp(tk.Tk):
             lightcolor=PALETTE["line"],
             darkcolor=PALETTE["line"],
             insertcolor=PALETTE["ink"],
-            padding=(12, 10),
+            padding=(10, 8),
             font=self.type.body,
         )
         self.style.map(
             "Source.TEntry",
-            bordercolor=[("focus", PALETTE["focus"])],
-            lightcolor=[("focus", PALETTE["focus"])],
-            darkcolor=[("focus", PALETTE["focus"])],
+            bordercolor=[("focus", PALETTE["primary"])],
+            lightcolor=[("focus", PALETTE["primary"])],
+            darkcolor=[("focus", PALETTE["primary"])],
         )
+
         self.style.configure(
             "Processing.Horizontal.TProgressbar",
-            troughcolor="#DCE8E0",
+            troughcolor=PALETTE["primary_soft"],
             background=PALETTE["primary"],
             lightcolor=PALETTE["primary"],
             darkcolor=PALETTE["primary"],
-            bordercolor="#DCE8E0",
-            thickness=9,
+            bordercolor=PALETTE["line"],
+            thickness=7,
         )
         self.style.configure(
             "Error.Horizontal.TProgressbar",
-            troughcolor="#F2DEDA",
+            troughcolor="#FADBD8",
             background=PALETTE["danger"],
             lightcolor=PALETTE["danger"],
             darkcolor=PALETTE["danger"],
-            bordercolor="#F2DEDA",
-            thickness=9,
+            bordercolor="#FADBD8",
+            thickness=7,
         )
+
         self.style.configure(
             "TRadiobutton",
-            background=PALETTE["canvas"],
+            background=PALETTE["surface_soft"],
             foreground=PALETTE["ink"],
             font=self.type.body,
+            focuscolor=PALETTE["focus"],
         )
         self.style.map(
             "TRadiobutton",
-            background=[("active", PALETTE["canvas"])],
+            background=[("active", PALETTE["surface_soft"])],
         )
+
         self.style.configure(
             "TCheckbutton",
             background=PALETTE["canvas"],
             foreground=PALETTE["ink"],
             font=self.type.body,
+            focuscolor=PALETTE["focus"],
         )
         self.style.map(
             "TCheckbutton",
             background=[("active", PALETTE["canvas"])],
         )
+
         self.style.configure(
             "Settings.TCombobox",
             fieldbackground=PALETTE["surface"],
             foreground=PALETTE["ink"],
-            padding=(10, 8),
+            padding=(8, 6),
             font=self.type.body,
         )
 
@@ -417,15 +474,15 @@ class StudyApp(tk.Tk):
         sidebar = tk.Frame(
             self,
             background=PALETTE["sidebar"],
-            highlightbackground=PALETTE["line"],
+            highlightbackground=PALETTE["sidebar_line"],
             highlightthickness=1,
-            width=248,
+            width=216,
         )
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
 
         brand = tk.Frame(sidebar, background=PALETTE["sidebar"])
-        brand.pack(fill="x", padx=26, pady=(30, 36))
+        brand.pack(fill="x", padx=20, pady=(24, 20))
         if self._sidebar_icon is not None:
             tk.Label(
                 brand,
@@ -435,20 +492,28 @@ class StudyApp(tk.Tk):
         else:
             tk.Label(
                 brand,
-                text="K",
-                font=(self.type.family, 14, "bold"),
+                text="К",
+                font=(self.type.family, 11, "bold"),
                 foreground="#FFFFFF",
                 background=PALETTE["primary"],
                 width=2,
-                pady=3,
+                pady=2,
             ).pack(side="left")
         tk.Label(
             brand,
-            text="Конспект",
-            font=(self.type.family, 16, "bold"),
-            foreground=PALETTE["ink"],
+            text="КОНСПЕКТ",
+            font=(self.type.family, 12, "bold"),
+            foreground=PALETTE["sidebar_ink"],
             background=PALETTE["sidebar"],
-        ).pack(side="left", padx=(10, 0), pady=(2, 0))
+        ).pack(side="left", padx=(10, 0))
+
+        new_lecture_btn = ttk.Button(
+            sidebar,
+            text="+ Новая лекция",
+            style="SidebarPrimary.TButton",
+            command=self.show_new_lecture,
+        )
+        new_lecture_btn.pack(fill="x", padx=16, pady=(0, 16))
 
         lectures_button = ttk.Button(
             sidebar,
@@ -456,26 +521,32 @@ class StudyApp(tk.Tk):
             style="Nav.TButton",
             command=self.show_library,
         )
-        lectures_button.pack(fill="x", padx=14)
+        lectures_button.pack(fill="x", padx=16, pady=(0, 4))
         settings_button = ttk.Button(
             sidebar,
             text="Настройки",
             style="Nav.TButton",
             command=self.show_settings,
         )
-        settings_button.pack(fill="x", padx=14, pady=(4, 0))
-        self._navigation_buttons.extend((lectures_button, settings_button))
+        settings_button.pack(fill="x", padx=16, pady=(0, 4))
+        self._navigation_buttons.extend((new_lecture_btn, lectures_button, settings_button))
 
         footer = tk.Frame(sidebar, background=PALETTE["sidebar"])
-        footer.pack(side="bottom", fill="x", padx=26, pady=28)
+        footer.pack(side="bottom", fill="x", padx=20, pady=20)
         tk.Label(
             footer,
             text="Данные хранятся\nна этом компьютере",
             justify="left",
             font=self.type.small,
-            foreground=PALETTE["muted"],
+            foreground=PALETTE["sidebar_muted"],
             background=PALETTE["sidebar"],
         ).pack(anchor="w")
+        ttk.Button(
+            footer,
+            text="Проверка системы",
+            style="Nav.TButton",
+            command=self.show_system_check_dialog,
+        ).pack(fill="x", pady=(10, 0))
 
         workspace = tk.Frame(self, background=PALETTE["canvas"])
         workspace.grid(row=0, column=1, sticky="nsew")
@@ -483,25 +554,25 @@ class StudyApp(tk.Tk):
         workspace.grid_rowconfigure(1, weight=1)
         self.workspace = workspace
 
-        header = tk.Frame(workspace, background=PALETTE["canvas"], height=78)
+        header = tk.Frame(workspace, background=PALETTE["canvas"], height=64)
         header.grid(row=0, column=0, sticky="ew")
         header.grid_propagate(False)
         tk.Label(
             header,
             text="Учебные материалы",
-            font=self.type.body_bold,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).pack(side="left", padx=40, pady=28)
+        ).pack(side="left", padx=36, pady=20)
         tk.Label(
             header,
             text="Обработка записи — локально",
             font=self.type.small,
-            foreground=PALETTE["muted"],
+            foreground=PALETTE["primary"],
             background=PALETTE["primary_soft"],
             padx=10,
-            pady=5,
-        ).pack(side="right", padx=40, pady=21)
+            pady=4,
+        ).pack(side="right", padx=36, pady=18)
 
         content = tk.Frame(workspace, background=PALETTE["canvas"])
         content.grid(row=1, column=0, sticky="nsew")
@@ -543,17 +614,27 @@ class StudyApp(tk.Tk):
 
     def show_settings(self) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 28, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
+        header_row = tk.Frame(screen, background=PALETTE["canvas"])
+        header_row.grid(row=0, column=0, sticky="ew")
+        header_row.grid_columnconfigure(0, weight=1)
+
         tk.Label(
-            screen,
+            header_row,
             text="Настройки",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            header_row,
+            text="Проверить систему",
+            style="Secondary.TButton",
+            command=self.show_system_check_dialog,
+        ).grid(row=0, column=1, sticky="e")
         tk.Label(
             screen,
             text=(
@@ -565,7 +646,7 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(8, 26))
+        ).grid(row=1, column=0, sticky="w", pady=(8, 24))
 
         viewport = tk.Frame(screen, background=PALETTE["canvas"])
         viewport.grid(row=2, column=0, sticky="nsew")
@@ -622,7 +703,7 @@ class StudyApp(tk.Tk):
         tk.Label(
             form,
             text="Создание конспекта через API",
-            font=self.type.body_bold,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, columnspan=2, sticky="w")
@@ -637,7 +718,7 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 18))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 16))
 
         tk.Label(
             form,
@@ -645,8 +726,8 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=2, column=0, sticky="w", padx=(0, 26), pady=8)
-        providers = tk.Frame(form, background=PALETTE["canvas"])
+        ).grid(row=2, column=0, sticky="w", padx=(0, 24), pady=8)
+        providers = tk.Frame(form, background=PALETTE["surface_soft"])
         providers.grid(row=2, column=1, sticky="w", pady=8)
         ttk.Radiobutton(
             providers,
@@ -654,14 +735,14 @@ class StudyApp(tk.Tk):
             value="openai",
             variable=self._settings_provider,
             command=self._settings_provider_changed,
-        ).pack(side="left")
+        ).pack(side="left", padx=8, pady=4)
         ttk.Radiobutton(
             providers,
             text="DeepSeek",
             value="deepseek",
             variable=self._settings_provider,
             command=self._settings_provider_changed,
-        ).pack(side="left", padx=(20, 0))
+        ).pack(side="left", padx=(16, 8), pady=4)
 
         tk.Label(
             form,
@@ -669,7 +750,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=3, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=3, column=0, sticky="w", padx=(0, 24), pady=8)
         api_key_entry = ttk.Entry(
             form,
             textvariable=self._settings_api_key,
@@ -684,7 +765,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=4, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=4, column=0, sticky="w", padx=(0, 24), pady=8)
         ttk.Entry(
             form,
             textvariable=self._settings_api_model,
@@ -696,12 +777,12 @@ class StudyApp(tk.Tk):
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=24,
+            pady=20,
         )
         tk.Label(
             form,
             text="Личный ChatGPT",
-            font=self.type.body_bold,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=6, column=0, columnspan=2, sticky="w")
@@ -716,7 +797,7 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 18))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 16))
 
         tk.Label(
             form,
@@ -724,7 +805,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=8, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=8, column=0, sticky="w", padx=(0, 24), pady=8)
         self._chatgpt_status_label = tk.Label(
             form,
             textvariable=self._chatgpt_status,
@@ -742,7 +823,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=9, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=9, column=0, sticky="w", padx=(0, 24), pady=8)
         self._chatgpt_model_combobox = ttk.Combobox(
             form,
             textvariable=self._settings_chatgpt_model,
@@ -770,12 +851,12 @@ class StudyApp(tk.Tk):
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=24,
+            pady=20,
         )
         tk.Label(
             form,
             text="Локальная обработка записи",
-            font=self.type.body_bold,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=12, column=0, columnspan=2, sticky="w")
@@ -785,7 +866,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(6, 18))
+        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(6, 16))
 
         tk.Label(
             form,
@@ -793,7 +874,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=14, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=14, column=0, sticky="w", padx=(0, 24), pady=8)
         ttk.Combobox(
             form,
             textvariable=self._settings_whisper_model,
@@ -809,7 +890,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=15, column=0, sticky="w", padx=(0, 26), pady=8)
+        ).grid(row=15, column=0, sticky="w", padx=(0, 24), pady=8)
         interval = tk.Frame(form, background=PALETTE["canvas"])
         interval.grid(row=15, column=1, sticky="w", pady=8)
         ttk.Combobox(
@@ -835,7 +916,7 @@ class StudyApp(tk.Tk):
         ).grid(row=16, column=1, sticky="w", pady=(10, 0))
 
         actions = tk.Frame(settings_body, background=PALETTE["canvas"])
-        actions.grid(row=1, column=0, sticky="ew", pady=(28, 12))
+        actions.grid(row=1, column=0, sticky="ew", pady=(24, 12))
         ttk.Button(
             actions,
             text="Сохранить настройки",
@@ -1104,7 +1185,7 @@ class StudyApp(tk.Tk):
 
     def show_library(self, animated: bool = True) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 28, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
@@ -1120,11 +1201,11 @@ class StudyApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             intro,
-            text="Все записи, конспекты и материалы по лекциям будут собраны здесь.",
+            text="Все записи, конспекты и материалы по лекциям собраны здесь.",
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Button(
             intro,
             text="Новая лекция  →",
@@ -1133,7 +1214,7 @@ class StudyApp(tk.Tk):
         ).grid(row=0, column=1, rowspan=2, sticky="e")
 
         divider = tk.Frame(screen, background=PALETTE["line"], height=1)
-        divider.grid(row=1, column=0, sticky="ew", pady=(32, 0))
+        divider.grid(row=1, column=0, sticky="ew", pady=(24, 0))
 
         if self.library:
             self._build_library_list(screen)
@@ -1150,25 +1231,6 @@ class StudyApp(tk.Tk):
 
         message = tk.Frame(empty, background=PALETTE["canvas"])
         message.grid(row=0, column=0)
-        icon = tk.Canvas(
-            message,
-            width=56,
-            height=56,
-            background=PALETTE["canvas"],
-            highlightthickness=0,
-        )
-        icon.create_rectangle(
-            13,
-            10,
-            43,
-            46,
-            outline=PALETTE["primary"],
-            width=2,
-        )
-        icon.create_line(19, 21, 37, 21, fill=PALETTE["primary"], width=2)
-        icon.create_line(19, 28, 37, 28, fill=PALETTE["primary"], width=2)
-        icon.create_line(19, 35, 31, 35, fill=PALETTE["primary"], width=2)
-        icon.pack(pady=(0, 18))
         tk.Label(
             message,
             text="Библиотека пока пуста",
@@ -1193,16 +1255,17 @@ class StudyApp(tk.Tk):
 
     def _build_library_list(self, screen: ttk.Frame) -> None:
         listing = tk.Frame(screen, background=PALETTE["canvas"])
-        listing.grid(row=2, column=0, sticky="nsew", pady=(22, 0))
+        listing.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
         listing.grid_columnconfigure(0, weight=1)
         listing.grid_rowconfigure(2, weight=1)
 
         toolbar = tk.Frame(listing, background=PALETTE["canvas"])
         toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         toolbar.grid_columnconfigure(0, weight=1)
-        search = ttk.Entry(toolbar, textvariable=self._library_query, width=30)
+        search = ttk.Entry(
+            toolbar, textvariable=self._library_query, width=24, style="Source.TEntry"
+        )
         search.grid(row=0, column=0, sticky="ew")
-        search.insert(0, "")
         search.configure(takefocus=True)
         search.bind("<Return>", lambda _: self.show_library(animated=False))
         ttk.Button(
@@ -1218,29 +1281,65 @@ class StudyApp(tk.Tk):
             "Пакет готов",
             "Конспект готов",
         )
-        ttk.Combobox(
+        state_combo = ttk.Combobox(
             toolbar,
             textvariable=self._library_state_filter,
             values=state_values,
             state="readonly",
-            width=18,
-        ).grid(row=0, column=2, padx=(8, 0))
-        ttk.Combobox(
+            width=16,
+            style="Settings.TCombobox",
+        )
+        state_combo.grid(row=0, column=2, padx=(8, 0))
+        state_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
+
+        date_values = ("Все даты", "Сегодня", "За 7 дней", "За 30 дней")
+        date_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self._library_date_filter,
+            values=date_values,
+            state="readonly",
+            width=12,
+            style="Settings.TCombobox",
+        )
+        date_combo.grid(row=0, column=3, padx=(8, 0))
+        date_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
+
+        sort_combo = ttk.Combobox(
             toolbar,
             textvariable=self._library_sort,
             values=("Сначала новые", "Сначала старые", "По названию"),
             state="readonly",
-            width=16,
-        ).grid(row=0, column=3, padx=(8, 0))
-        size = calculate_library_size(self.library, self.app_paths.data_dir)
-        self._library_storage_status.set(f"Занято: {self._format_bytes(size)}")
+            width=15,
+            style="Settings.TCombobox",
+        )
+        sort_combo.grid(row=0, column=4, padx=(8, 0))
+        sort_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
+
+        ttk.Button(
+            toolbar,
+            text="Корзина",
+            style="Secondary.TButton",
+            command=self.show_trash_dialog,
+        ).grid(row=0, column=5, padx=(8, 0))
+
         tk.Label(
             toolbar,
             textvariable=self._library_storage_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=0, column=4, padx=(12, 0))
+        ).grid(row=0, column=6, padx=(12, 0))
+
+        def _calc_size_worker():
+            try:
+                sz = calculate_library_size(self.library, self.app_paths.data_dir)
+                self.after(
+                    0, lambda: self._library_storage_status.set(f"Занято: {self._format_bytes(sz)}")
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_calc_size_worker, daemon=True).start()
 
         state_map = {
             "Импортировано": "imported",
@@ -1249,6 +1348,8 @@ class StudyApp(tk.Tk):
             "Конспект готов": "lesson_ready",
         }
         state_filter = state_map.get(self._library_state_filter.get())
+        date_map = {"Сегодня": "today", "За 7 дней": "7_days", "За 30 дней": "30_days"}
+        date_filter = date_map.get(self._library_date_filter.get())
         from .workflow import LectureState
 
         filtered = filter_and_sort_recordings(
@@ -1262,6 +1363,7 @@ class StudyApp(tk.Tk):
                 if self._library_sort.get() == "Сначала старые"
                 else "date_desc"
             ),
+            date_filter=date_filter,
             base_dir=self.app_paths.data_dir,
         )
         tk.Label(
@@ -1305,40 +1407,35 @@ class StudyApp(tk.Tk):
         for index, recording in enumerate(filtered):
             row = tk.Frame(
                 rows,
-                background=PALETTE["surface_soft"],
+                background=PALETTE["surface"],
                 highlightbackground=PALETTE["line"],
                 highlightthickness=1,
                 padx=18,
-                pady=15,
+                pady=14,
             )
-            row.grid(row=index, column=0, sticky="ew", pady=(0, 8))
+            row.grid(row=index, column=0, sticky="ew", pady=(0, 6))
             row.grid_columnconfigure(0, weight=1)
             tk.Label(
                 row,
                 text=recording.title,
                 font=self.type.body_bold,
                 foreground=PALETTE["ink"],
-                background=PALETTE["surface_soft"],
-                wraplength=580,
+                background=PALETTE["surface"],
+                wraplength=560,
                 justify="left",
             ).grid(row=0, column=0, sticky="w")
-            tk.Label(
-                row,
-                text=format_imported_at(recording.imported_at),
-                font=self.type.small,
-                foreground=PALETTE["muted"],
-                background=PALETTE["surface_soft"],
-            ).grid(row=1, column=0, sticky="w", pady=(5, 0))
             tk.Label(
                 row,
                 text=self._recording_summary(recording),
                 font=self.type.small,
                 foreground=PALETTE["muted"],
-                background=PALETTE["surface_soft"],
-            ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+                background=PALETTE["surface"],
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
             prepared = lecture_is_prepared(recording)
             package_ready = prepared and context_package_is_ready(recording)
             lesson_ready = lesson_is_ready(recording)
+
             if lesson_ready:
                 status_text = "Конспект готов"
                 status_color = PALETTE["success"]
@@ -1351,7 +1448,7 @@ class StudyApp(tk.Tk):
                 action = on_action_reader
                 action_state = "normal"
             elif not prepared:
-                status_text = "Материалы ещё не подготовлены"
+                status_text = "Материалы не подготовлены"
                 status_color = PALETTE["muted"]
                 action_text = "Подготовить"
                 action_style = "Primary.TButton"
@@ -1373,7 +1470,7 @@ class StudyApp(tk.Tk):
                 action = on_action_pkg
                 action_state = "normal"
             else:
-                status_text = "Готово к созданию конспекта"
+                status_text = "Готово к созданию"
                 status_color = PALETTE["success"]
                 action_text = "Создать конспект"
                 action_style = "Primary.TButton"
@@ -1383,22 +1480,34 @@ class StudyApp(tk.Tk):
 
                 action = on_action_choice
                 action_state = "normal"
+
+            right_meta = tk.Frame(row, background=PALETTE["surface"])
+            right_meta.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
             tk.Label(
-                row,
+                right_meta,
+                text=format_imported_at(recording.imported_at),
+                font=self.type.small,
+                foreground=PALETTE["faint"],
+                background=PALETTE["surface"],
+            ).pack(anchor="e")
+            tk.Label(
+                right_meta,
                 text=status_text,
                 font=self.type.small,
                 foreground=status_color,
-                background=PALETTE["surface_soft"],
-            ).grid(row=3, column=0, sticky="w", pady=(7, 0))
+                background=PALETTE["surface"],
+            ).pack(anchor="e", pady=(2, 0))
+
             ttk.Button(
                 row,
                 text=action_text,
                 style=action_style,
                 command=action,
                 state=action_state,
-            ).grid(row=0, column=1, rowspan=4, sticky="e", padx=(18, 0))
-            management = tk.Frame(row, background=PALETTE["surface_soft"])
-            management.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            ).grid(row=0, column=2, rowspan=2, sticky="e", padx=(16, 0))
+
+            management = tk.Frame(row, background=PALETTE["surface"])
+            management.grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
             ttk.Button(
                 management,
                 text="Переименовать",
@@ -1410,7 +1519,13 @@ class StudyApp(tk.Tk):
                 text="В корзину",
                 style="Secondary.TButton",
                 command=lambda item=recording: self._trash_library_recording(item),
-            ).pack(side="left", padx=(8, 0))
+            ).pack(side="left", padx=(6, 0))
+            ttk.Button(
+                management,
+                text="Открыть папку",
+                style="Secondary.TButton",
+                command=lambda item=recording: self._open_lecture_folder(item),
+            ).pack(side="left", padx=(6, 0))
 
         self._bind_mousewheel_tree(canvas, canvas)
 
@@ -1422,6 +1537,198 @@ class StudyApp(tk.Tk):
                 return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
             size /= 1024
         return "0 Б"
+
+    def _open_lecture_folder(self, recording: BBBRecording) -> None:
+        from .platform_services import PlatformSystemActions
+
+        target = default_lecture_directory(recording, base_dir=self.app_paths.data_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        PlatformSystemActions().open_in_file_manager(target)
+
+    def show_trash_dialog(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Корзина лекций")
+        dialog.geometry("640x480")
+        dialog.minsize(500, 360)
+        dialog.configure(background=PALETTE["canvas"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        header = tk.Frame(dialog, background=PALETTE["canvas"], padx=24, pady=18)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Корзина удалённых лекций",
+            font=self.type.heading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["canvas"],
+        ).pack(anchor="w")
+
+        content_frame = tk.Frame(dialog, background=PALETTE["canvas"], padx=24)
+        content_frame.pack(fill="both", expand=True)
+
+        footer = tk.Frame(dialog, background=PALETTE["canvas"], padx=24, pady=16)
+        footer.pack(fill="x", side="bottom")
+
+        def refresh_trash() -> None:
+            for child in content_frame.winfo_children():
+                child.destroy()
+            items = list_trash(self.app_paths.data_dir)
+            if not items:
+                tk.Label(
+                    content_frame,
+                    text="Корзина пуста.",
+                    font=self.type.body,
+                    foreground=PALETTE["muted"],
+                    background=PALETTE["canvas"],
+                ).pack(pady=40)
+                empty_btn.configure(state="disabled")
+                return
+
+            empty_btn.configure(state="normal")
+            for item in items:
+                row = tk.Frame(
+                    content_frame,
+                    background=PALETTE["surface"],
+                    highlightbackground=PALETTE["line"],
+                    highlightthickness=1,
+                    padx=14,
+                    pady=10,
+                )
+                row.pack(fill="x", pady=4)
+                row.grid_columnconfigure(0, weight=1)
+                tk.Label(
+                    row,
+                    text=item.get("original_title", "Без названия"),
+                    font=self.type.body_bold,
+                    foreground=PALETTE["ink"],
+                    background=PALETTE["surface"],
+                    anchor="w",
+                ).grid(row=0, column=0, sticky="w")
+                size_str = self._format_bytes(item.get("total_bytes", 0))
+                date_str = str(item.get("trashed_at", ""))[:10]
+                tk.Label(
+                    row,
+                    text=f"Удалено: {date_str} · {size_str}",
+                    font=self.type.small,
+                    foreground=PALETTE["muted"],
+                    background=PALETTE["surface"],
+                ).grid(row=1, column=0, sticky="w")
+
+                def do_restore(m_id=item.get("meeting_id", ""), src=item.get("source_url")) -> None:
+                    try:
+                        restore_from_trash(
+                            self.app_paths.library_path,
+                            m_id,
+                            self.app_paths.data_dir,
+                            source_url=src,
+                        )
+                        self.library = self._load_library_safely()
+                        self.show_library(animated=False)
+                        refresh_trash()
+                    except Exception as exc:
+                        from tkinter import messagebox
+
+                        messagebox.showerror("Ошибка восстановления", str(exc))
+
+                ttk.Button(
+                    row,
+                    text="Восстановить",
+                    style="Secondary.TButton",
+                    command=do_restore,
+                ).grid(row=0, column=1, rowspan=2, padx=(8, 0))
+
+        def do_empty() -> None:
+            from tkinter import messagebox
+
+            if messagebox.askyesno(
+                "Очистить корзину", "Безвозвратно удалить все материалы из корзины?"
+            ):
+                empty_trash(self.app_paths.data_dir)
+                refresh_trash()
+
+        empty_btn = ttk.Button(
+            footer,
+            text="Очистить корзину",
+            style="Secondary.TButton",
+            command=do_empty,
+        )
+        empty_btn.pack(side="left")
+
+        ttk.Button(
+            footer,
+            text="Закрыть",
+            style="Primary.TButton",
+            command=dialog.destroy,
+        ).pack(side="right")
+
+        refresh_trash()
+
+    def show_system_check_dialog(self) -> None:
+        from .diagnostics import collect_system_diagnostics
+
+        diag = collect_system_diagnostics(self.app_paths)
+        dialog = tk.Toplevel(self)
+        dialog.title("Проверка системы")
+        dialog.geometry("540x440")
+        dialog.minsize(460, 360)
+        dialog.configure(background=PALETTE["canvas"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        body = tk.Frame(dialog, background=PALETTE["canvas"], padx=24, pady=20)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="Готовность системы",
+            font=self.type.heading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["canvas"],
+        ).pack(anchor="w", pady=(0, 16))
+
+        deps = diag.get("dependencies", {})
+        items = [
+            ("FFmpeg (извлечение аудио и кадров)", deps.get("ffmpeg_available", False)),
+            ("Tesseract OCR (распознавание текста)", deps.get("tesseract_available", False)),
+            ("Codex CLI (личный ChatGPT)", deps.get("codex_available", False)),
+            ("Папки приложения доступны для записи", diag.get("status") == "ok"),
+        ]
+
+        for label, ok in items:
+            row = tk.Frame(
+                body,
+                background=PALETTE["surface"],
+                highlightbackground=PALETTE["line"],
+                highlightthickness=1,
+                padx=14,
+                pady=10,
+            )
+            row.pack(fill="x", pady=4)
+            icon_text = "✓" if ok else "✕"
+            icon_color = PALETTE["success"] if ok else PALETTE["danger"]
+            tk.Label(
+                row,
+                text=icon_text,
+                font=self.type.body_bold,
+                foreground=icon_color,
+                background=PALETTE["surface"],
+                width=3,
+            ).pack(side="left")
+            tk.Label(
+                row,
+                text=label,
+                font=self.type.body,
+                foreground=PALETTE["ink"],
+                background=PALETTE["surface"],
+            ).pack(side="left", padx=8)
+
+        ttk.Button(
+            body,
+            text="Закрыть",
+            style="Primary.TButton",
+            command=dialog.destroy,
+        ).pack(side="bottom", pady=(20, 0), anchor="e")
 
     def _rename_library_recording(self, recording: BBBRecording) -> None:
         from tkinter import simpledialog
@@ -1465,7 +1772,7 @@ class StudyApp(tk.Tk):
     def show_new_lecture(self) -> None:
         self._import_status.set("")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 28, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -1481,83 +1788,101 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
         tk.Label(
             screen,
-            text="Вставь публичную ссылку на запись BigBlueButton. Мы быстро проверим доступные материалы.",
+            text="Выбери способ добавления учебного материала.",
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=2, column=0, sticky="w", pady=(8, 26))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 20))
 
-        choices = tk.Frame(
+        bbb_panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=24,
-            pady=24,
+            padx=20,
+            pady=18,
         )
-        choices.grid(row=3, column=0, sticky="ew")
-        choices.grid_columnconfigure(1, weight=1)
+        bbb_panel.grid(row=3, column=0, sticky="ew")
+        bbb_panel.grid_columnconfigure(0, weight=1)
         tk.Label(
-            choices,
-            text="Источник записи",
-            font=self.type.body_bold,
+            bbb_panel,
+            text="Ссылка на запись BigBlueButton",
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
+            background=PALETTE["surface"],
+        ).grid(row=0, column=0, sticky="w")
         tk.Label(
-            choices,
+            bbb_panel,
             text="Видео не будет скачиваться сейчас: сначала сохраним потоки и тексты слайдов в библиотеку.",
-            font=self.type.body,
-            foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(7, 20))
-        tk.Label(
-            choices,
-            text="Ссылка на BBB playback",
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 7))
+            background=PALETTE["surface"],
+        ).grid(row=1, column=0, sticky="w", pady=(4, 14))
         source_entry = ttk.Entry(
-            choices,
+            bbb_panel,
             textvariable=self._bbb_url,
             style="Source.TEntry",
         )
-        source_entry.grid(row=3, column=0, columnspan=2, sticky="ew")
+        source_entry.grid(row=2, column=0, sticky="ew")
         source_entry.focus_set()
         source_entry.bind("<Return>", lambda _: self.start_bbb_import())
 
         self._import_button = ttk.Button(
-            choices,
+            bbb_panel,
             text="Проверить и добавить",
             style="Primary.TButton",
             command=self.start_bbb_import,
         )
-        self._import_button.grid(row=4, column=0, sticky="w", pady=(16, 0))
+        self._import_button.grid(row=3, column=0, sticky="w", pady=(14, 0))
+
+        file_panel = tk.Frame(
+            screen,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=20,
+            pady=18,
+        )
+        file_panel.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        file_panel.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            file_panel,
+            text="Локальный файл с диска",
+            font=self.type.subheading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface"],
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            file_panel,
+            text="Импорт записанной лекции с компьютера (аудио или видео MP4, MP3, WAV, MKV).",
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["surface"],
+        ).grid(row=1, column=0, sticky="w", pady=(4, 14))
         ttk.Button(
-            choices,
-            text="Выбрать аудио/видео с диска",
+            file_panel,
+            text="Выбрать файл с диска",
             style="Secondary.TButton",
             command=self.start_local_media_picker,
-        ).grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(16, 0))
+        ).grid(row=2, column=0, sticky="w")
+
         self._import_status_label = tk.Label(
-            choices,
+            screen,
             textvariable=self._import_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["canvas"],
             wraplength=700,
             justify="left",
         )
         self._import_status_label.grid(
             row=5,
             column=0,
-            columnspan=2,
             sticky="w",
-            pady=(14, 0),
+            pady=(16, 0),
         )
 
         self._show_screen(screen, animated=True)
@@ -1823,7 +2148,7 @@ class StudyApp(tk.Tk):
         description: str = "Аудио и кадры будут обработаны на этом компьютере. Платные API не используются.",
     ) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 40, 40, 40))
+        screen.configure(padding=(36, 36, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
 
         tk.Label(
@@ -1836,53 +2161,54 @@ class StudyApp(tk.Tk):
 
         panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=28,
-            pady=28,
+            padx=24,
+            pady=24,
         )
-        panel.grid(row=1, column=0, sticky="ew", pady=(26, 0))
+        panel.grid(row=1, column=0, sticky="ew", pady=(24, 0))
         panel.grid_columnconfigure(0, weight=1)
         tk.Label(
             panel,
             text=recording.title,
             font=self.type.heading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             panel,
             text=(f"{format_imported_at(recording.imported_at)} · ID …{recording.meeting_id[-8:]}"),
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
+            background=PALETTE["surface"],
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
         tk.Label(
             panel,
             text=description,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=700,
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(12, 22))
-        progress_header = tk.Frame(panel, background=PALETTE["surface_soft"])
-        progress_header.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        ).grid(row=2, column=0, sticky="w", pady=(10, 20))
+
+        progress_header = tk.Frame(panel, background=PALETTE["surface"])
+        progress_header.grid(row=3, column=0, sticky="ew", pady=(0, 6))
         progress_header.grid_columnconfigure(0, weight=1)
         tk.Label(
             progress_header,
             textvariable=self._processing_state,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         self._processing_percent_label = tk.Label(
             progress_header,
             textvariable=self._processing_percent,
             font=self.type.small,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         )
         self._processing_percent_label.grid(row=0, column=1, sticky="e")
         self._processing_progress = ttk.Progressbar(
@@ -1898,20 +2224,20 @@ class StudyApp(tk.Tk):
             textvariable=self._processing_status,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             justify="left",
             wraplength=720,
         )
-        self._processing_status_label.grid(row=5, column=0, sticky="w", pady=(18, 0))
+        self._processing_status_label.grid(row=5, column=0, sticky="w", pady=(16, 0))
         tk.Label(
             panel,
             textvariable=self._processing_activity,
             font=self.type.small,
             foreground=PALETTE["faint"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=6, column=0, sticky="w", pady=(7, 18))
+            background=PALETTE["surface"],
+        ).grid(row=6, column=0, sticky="w", pady=(6, 16))
 
-        actions = tk.Frame(panel, background=PALETTE["surface_soft"])
+        actions = tk.Frame(panel, background=PALETTE["surface"])
         actions.grid(row=7, column=0, sticky="w")
         self._processing_retry_button = ttk.Button(
             actions,
@@ -1935,13 +2261,13 @@ class StudyApp(tk.Tk):
             style="Secondary.TButton",
             command=self.cancel_active_processing,
         )
-        self._processing_cancel_button.pack(side="left", padx=(12, 0))
+        self._processing_cancel_button.pack(side="left", padx=(10, 0))
         tk.Label(
             panel,
             textvariable=self._processing_diagnostic,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=720,
             justify="left",
         ).grid(row=8, column=0, sticky="w", pady=(14, 0))
@@ -2142,7 +2468,7 @@ class StudyApp(tk.Tk):
 
     def show_chat_provider_choice(self, recording: BBBRecording) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -2157,28 +2483,27 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
         tk.Label(
             screen,
             text=(
-                "Текстовый пакет лекции уже подготовлен локально. Можно создать "
-                "lesson.md автоматически через личный ChatGPT или API. DeepSeek остаётся "
-                "доступен как ручной веб-чат."
+                "Текстовый пакет лекции уже подготовлен локально. Выбери удобный сервис "
+                "для генерации конспекта."
             ),
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
             wraplength=760,
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 24))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 20))
 
         panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=28,
-            pady=26,
+            padx=24,
+            pady=22,
         )
         panel.grid(row=3, column=0, sticky="ew")
         panel.grid_columnconfigure(0, weight=1)
@@ -2199,8 +2524,8 @@ class StudyApp(tk.Tk):
         else:
             api_title = "API · не настроен"
             api_description = (
-                "Добавь ключ OpenAI или DeepSeek, чтобы приложение само создавало "
-                "и сохраняло готовый конспект."
+                "Добавь ключ OpenAI или DeepSeek в настройках, чтобы приложение "
+                "автоматически создавало и сохраняло готовый конспект."
             )
             api_action_text = "Настроить API"
             api_action = self.show_settings
@@ -2209,68 +2534,69 @@ class StudyApp(tk.Tk):
         tk.Label(
             panel,
             text=api_title,
-            font=self.type.heading,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             panel,
             text=api_description,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=590,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Button(
             panel,
             text=api_action_text,
             style=api_action_style,
             command=api_action,
         ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(20, 0))
+
         ttk.Separator(panel, orient="horizontal").grid(
             row=2,
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=22,
+            pady=18,
         )
 
         tk.Label(
             panel,
             text="Личный ChatGPT",
-            font=self.type.heading,
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=3, column=0, sticky="w")
         self._chatgpt_status_label = tk.Label(
             panel,
             textvariable=self._chatgpt_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=590,
             justify="left",
         )
-        self._chatgpt_status_label.grid(row=4, column=0, sticky="w", pady=(5, 0))
+        self._chatgpt_status_label.grid(row=4, column=0, sticky="w", pady=(4, 0))
         tk.Label(
             panel,
             textvariable=self._chatgpt_model_summary,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=590,
             justify="left",
-        ).grid(row=5, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(4, 0))
 
-        chatgpt_model_row = tk.Frame(panel, background=PALETTE["surface_soft"])
-        chatgpt_model_row.grid(row=6, column=0, sticky="w", pady=(14, 0))
+        chatgpt_model_row = tk.Frame(panel, background=PALETTE["surface"])
+        chatgpt_model_row.grid(row=6, column=0, sticky="w", pady=(10, 0))
         tk.Label(
             chatgpt_model_row,
             text="Модель",
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).pack(side="left")
         self._chatgpt_model_combobox = ttk.Combobox(
             chatgpt_model_row,
@@ -2280,7 +2606,7 @@ class StudyApp(tk.Tk):
             width=24,
             style="Settings.TCombobox",
         )
-        self._chatgpt_model_combobox.pack(side="left", padx=(12, 0))
+        self._chatgpt_model_combobox.pack(side="left", padx=(10, 0))
         self._chatgpt_model_combobox.bind(
             "<<ComboboxSelected>>",
             lambda _: self._set_active_chatgpt_model(self._settings_chatgpt_model.get()),
@@ -2291,27 +2617,28 @@ class StudyApp(tk.Tk):
             style="Primary.TButton",
             command=lambda: self.show_consent_screen(recording, "chatgpt"),
         ).grid(row=3, column=1, rowspan=4, sticky="e", padx=(20, 0))
+
         ttk.Separator(panel, orient="horizontal").grid(
             row=7,
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=22,
+            pady=18,
         )
         tk.Label(
             panel,
-            text="DeepSeek",
-            font=self.type.heading,
+            text="DeepSeek Web",
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=8, column=0, sticky="w")
         tk.Label(
             panel,
-            text="Откроется веб-чат DeepSeek. Отправка выполняется только после твоей проверки.",
+            text="Откроется веб-чат DeepSeek. Отправка выполняется вручную только после твоей проверки.",
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
-        ).grid(row=9, column=0, sticky="w", pady=(5, 0))
+            background=PALETTE["surface"],
+        ).grid(row=9, column=0, sticky="w", pady=(4, 0))
         ttk.Button(
             panel,
             text="Выбрать DeepSeek",
@@ -2351,18 +2678,41 @@ class StudyApp(tk.Tk):
                 self._handoff_status.set(str(exc))
                 return
 
+        prompt_path = target / "lesson-prompt.md"
         size_kb = 0
         char_count = 0
+        limit_warning = ""
+        txt = ""
+        prompt_txt = ""
         if context_path.is_file():
             try:
                 txt = context_path.read_text(encoding="utf-8")
-                size_kb = max(1, len(txt.encode("utf-8")) // 1024)
-                char_count = len(txt)
+            except OSError:
+                pass
+        if prompt_path.is_file():
+            try:
+                prompt_txt = prompt_path.read_text(encoding="utf-8")
             except OSError:
                 pass
 
+        total_bytes = len(txt.encode("utf-8")) + len(prompt_txt.encode("utf-8"))
+        char_count = len(txt) + len(prompt_txt)
+        size_kb = max(1, total_bytes // 1024)
+
+        provider_name = (
+            "chatgpt"
+            if flow_type == "chatgpt"
+            else "deepseek"
+            if flow_type == "deepseek_handoff"
+            else "openrouter"
+        )
+        try:
+            validate_provider_context_limits(provider_name, char_count, total_bytes)
+        except OutboundContextError as exc:
+            limit_warning = f"Внимание: {exc}"
+
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -2378,7 +2728,7 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
 
         tk.Label(
             screen,
@@ -2387,24 +2737,24 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
+        ).grid(row=2, column=0, sticky="w", pady=(10, 0))
 
-        panel = tk.Frame(
+        transmitted_panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=28,
-            pady=24,
+            padx=22,
+            pady=18,
         )
-        panel.grid(row=3, column=0, sticky="nsew", pady=(24, 0))
+        transmitted_panel.grid(row=3, column=0, sticky="ew", pady=(20, 0))
 
         tk.Label(
-            panel,
-            text="Состав передаваемых данных:",
-            font=self.type.heading,
+            transmitted_panel,
+            text=f"Передаётся в {provider_label}:",
+            font=self.type.subheading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
 
         details = [
@@ -2415,29 +2765,60 @@ class StudyApp(tk.Tk):
             f"• Примерный объём: ~{size_kb} КБ ({char_count:,} символов)",
         ]
         tk.Label(
-            panel,
+            transmitted_panel,
             text="\n".join(details),
             font=self.type.body,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(12, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        if limit_warning:
+            tk.Label(
+                transmitted_panel,
+                text=limit_warning,
+                font=self.type.small,
+                foreground=PALETTE["danger"],
+                background=PALETTE["surface"],
+                justify="left",
+                wraplength=620,
+            ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+        local_panel = tk.Frame(
+            screen,
+            background=PALETTE["surface_soft"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=22,
+            pady=18,
+        )
+        local_panel.grid(row=4, column=0, sticky="ew", pady=(12, 0))
 
         tk.Label(
-            panel,
-            text=(
-                "✓ Исходный URL BigBlueButton удалён.\n"
-                "✓ Идентификатор встречи (meeting ID) удалён.\n"
-                "✓ Локальные пути к файлам и служебные логи исключены."
-            ),
-            font=self.type.small,
+            local_panel,
+            text="Остаётся на этом компьютере (не передаётся):",
+            font=self.type.subheading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface_soft"],
+        ).grid(row=0, column=0, sticky="w")
+
+        local_details = [
+            "✓ Исходный URL BigBlueButton",
+            "✓ Идентификатор встречи (meeting ID)",
+            "✓ Исходные медиафайлы записи (аудио и видео)",
+            "✓ Локальные пути к файлам и служебные логи",
+        ]
+        tk.Label(
+            local_panel,
+            text="\n".join(local_details),
+            font=self.type.body,
             foreground=PALETTE["success"],
             background=PALETTE["surface_soft"],
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(16, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
 
-        btn_row = tk.Frame(panel, background=PALETTE["surface_soft"])
-        btn_row.grid(row=3, column=0, sticky="w", pady=(20, 0))
+        btn_row = tk.Frame(screen, background=PALETTE["canvas"])
+        btn_row.grid(row=5, column=0, sticky="w", pady=(20, 0))
 
         def on_confirm() -> None:
             if flow_type == "api":
@@ -2459,7 +2840,7 @@ class StudyApp(tk.Tk):
             text="Отмена",
             style="Secondary.TButton",
             command=lambda: self.show_chat_provider_choice(recording),
-        ).pack(side="left", padx=(12, 0))
+        ).pack(side="left", padx=(10, 0))
 
         self._show_screen(screen, animated=True)
 
@@ -2504,7 +2885,9 @@ class StudyApp(tk.Tk):
     ) -> None:
         def task(token: CancellationToken, progress) -> ApiLessonResult:
             token.check_cancelled()
-            return generate_lesson_via_api(recording, settings, progress=progress)
+            return generate_lesson_via_api(
+                recording, settings, progress=progress, cancellation_token=token
+            )
 
         def on_event(event: JobEvent) -> None:
             def apply_event() -> None:
@@ -2548,6 +2931,7 @@ class StudyApp(tk.Tk):
                         message,
                     ),
                 ),
+                cancellation_token=getattr(self, "_processing_token", None),
             )
         except ApiGenerationError as exc:
             diagnostic_path = record_exception(
@@ -2682,6 +3066,7 @@ class StudyApp(tk.Tk):
                 progress=lambda percent, message: progress(
                     min(95, 45 + max(0, min(100, percent)) // 2), message
                 ),
+                cancellation_token=token,
             )
             return result, status, models, model_error
 
@@ -2777,6 +3162,7 @@ class StudyApp(tk.Tk):
                 recording,
                 model,
                 progress=generation_progress,
+                cancellation_token=getattr(self, "_processing_token", None),
             )
         except ChatGPTAccountError as exc:
             diagnostic_path = record_exception("generation.chatgpt", exc)
@@ -2864,7 +3250,7 @@ class StudyApp(tk.Tk):
         )
 
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
@@ -2880,34 +3266,34 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
 
         panel = tk.Frame(
             screen,
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=28,
-            pady=28,
+            padx=24,
+            pady=24,
         )
-        panel.grid(row=2, column=0, sticky="nsew", pady=(24, 0))
+        panel.grid(row=2, column=0, sticky="nsew", pady=(20, 0))
         panel.grid_columnconfigure(0, weight=1)
         tk.Label(
             panel,
             text=recording.title,
             font=self.type.heading,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             panel,
             text=description,
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             wraplength=720,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(8, 22))
+        ).grid(row=1, column=0, sticky="w", pady=(6, 18))
 
         from .platform_services import PlatformKeyboardConventions
 
@@ -2922,7 +3308,7 @@ class StudyApp(tk.Tk):
             text=steps,
             font=self.type.body,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             justify="left",
         ).grid(row=2, column=0, sticky="w")
         ttk.Button(
@@ -2930,22 +3316,22 @@ class StudyApp(tk.Tk):
             text=f"Открыть {provider} и скопировать инструкцию",
             style="Primary.TButton",
             command=lambda: self.show_consent_screen(recording, "deepseek_handoff"),
-        ).grid(row=3, column=0, sticky="w", pady=(26, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(22, 0))
         ttk.Button(
             panel,
             text="Я получил ответ — вставить и сохранить",
             style="Secondary.TButton",
             command=lambda: self.show_lesson_editor(recording),
-        ).grid(row=4, column=0, sticky="w", pady=(12, 0))
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
         tk.Label(
             panel,
             textvariable=self._handoff_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             justify="left",
             wraplength=720,
-        ).grid(row=5, column=0, sticky="w", pady=(18, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(16, 0))
 
         self._show_screen(screen, animated=True)
 
@@ -2960,12 +3346,15 @@ class StudyApp(tk.Tk):
 
         shortcut = PlatformKeyboardConventions().format_shortcut("V")
         try:
+            context_text = handoff.context_path.read_text(encoding="utf-8")
             prompt = handoff.prompt_path.read_text(encoding="utf-8").strip()
+            _validate_outbound_text("context", context_text, ())
+            _validate_outbound_text("prompt", prompt, ())
             self.clipboard_clear()
             self.clipboard_append(prompt)
             self.update()
             launch_deepseek_handoff(handoff)
-        except (DeepSeekHandoffError, OSError) as exc:
+        except (DeepSeekHandoffError, OutboundContextError, OSError) as exc:
             self._handoff_status.set(str(exc))
         except tk.TclError:
             self._handoff_status.set("Не удалось скопировать инструкцию в буфер обмена.")
@@ -2978,7 +3367,7 @@ class StudyApp(tk.Tk):
     def show_lesson_editor(self, recording: BBBRecording) -> None:
         self._lesson_status.set("")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(3, weight=1)
 
@@ -2994,7 +3383,7 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
         tk.Label(
             screen,
             text=(
@@ -3006,13 +3395,13 @@ class StudyApp(tk.Tk):
             background=PALETTE["canvas"],
             wraplength=780,
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 18))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 16))
 
         editor = scrolledtext.ScrolledText(
             screen,
             font=self.type.body,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             insertbackground=PALETTE["ink"],
             relief="solid",
             borderwidth=1,
@@ -3031,7 +3420,7 @@ class StudyApp(tk.Tk):
         self._lesson_editor = editor
 
         actions = tk.Frame(screen, background=PALETTE["canvas"])
-        actions.grid(row=4, column=0, sticky="ew", pady=(18, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(16, 0))
         ttk.Button(
             actions,
             text="Сохранить lesson.md",
@@ -3075,9 +3464,10 @@ class StudyApp(tk.Tk):
             return
 
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(40, 32, 40, 40))
+        screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(3, weight=1)
+
         ttk.Button(
             screen,
             text="← К библиотеке",
@@ -3090,14 +3480,14 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(34, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
         tk.Label(
             screen,
             text=recording.title,
             font=self.type.body_bold,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=2, column=0, sticky="w", pady=(8, 18))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 16))
 
         reader_area = tk.Frame(screen, background=PALETTE["canvas"])
         reader_area.grid(row=3, column=0, sticky="nsew")
@@ -3111,21 +3501,28 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["ink"],
             relief="solid",
             borderwidth=1,
+            highlightthickness=0,
+            font=self.type.small,
         )
         toc_list.grid(row=0, column=0, sticky="ns", padx=(0, 12))
         reader = scrolledtext.ScrolledText(
             reader_area,
             font=self.type.body,
             foreground=PALETTE["ink"],
-            background=PALETTE["surface_soft"],
+            background=PALETTE["surface"],
             relief="solid",
             borderwidth=1,
             wrap="word",
-            padx=18,
-            pady=16,
+            padx=20,
+            pady=18,
         )
         reader.grid(row=0, column=1, sticky="nsew")
         reader.insert("1.0", content)
+        rec_key = recording.lecture_id or recording.meeting_id
+        saved_pos = self._reading_positions.get(rec_key)
+        if saved_pos is not None:
+            reader.after(50, lambda: reader.yview_moveto(saved_pos))
+
         toc_entries = extract_table_of_contents(content)
         for entry in toc_entries:
             toc_list.insert("end", f"{'  ' * (entry.level - 1)}{entry.title}")
@@ -3149,21 +3546,26 @@ class StudyApp(tk.Tk):
             line = int(str(index).split(".", 1)[0])
             matching = [item for item in timestamp_lines if item.line_number == line]
             if matching:
-                self._lesson_status.set(
-                    f"Таймкод {matching[0].raw_str} · {int(matching[0].total_seconds)} сек."
-                )
+                ts = matching[0]
+                self._lesson_status.set(f"Таймкод {ts.raw_str} · {int(ts.total_seconds)} сек.")
+                self._open_timestamp_media_or_frame(recording, ts.total_seconds)
 
         reader.tag_bind("timestamp", "<Button-1>", show_timestamp)
 
         def update_reader_position(_: tk.Event | None = None) -> None:
+            try:
+                self._reading_positions[rec_key] = reader.yview()[0]
+            except Exception:
+                pass
             current_line = int(str(reader.index("insert")).split(".", 1)[0])
             total_lines = int(str(reader.index("end-1c")).split(".", 1)[0])
             self._lesson_status.set(f"Позиция: строка {current_line} из {total_lines}")
 
         reader.bind("<ButtonRelease-1>", update_reader_position, add="+")
         reader.bind("<KeyRelease>", update_reader_position, add="+")
+        reader.bind("<MouseWheel>", update_reader_position, add="+")
         actions = tk.Frame(screen, background=PALETTE["canvas"])
-        actions.grid(row=4, column=0, sticky="ew", pady=(18, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(16, 0))
 
         ttk.Button(
             actions,
@@ -3206,18 +3608,18 @@ class StudyApp(tk.Tk):
             text="Экспорт в HTML",
             style="Secondary.TButton",
             command=export_html,
-        ).pack(side="left", padx=(10, 0))
+        ).pack(side="left", padx=(8, 0))
 
         ttk.Button(
             actions,
             text="Экспорт архива (.zip)",
             style="Secondary.TButton",
             command=export_zip,
-        ).pack(side="left", padx=(10, 0))
+        ).pack(side="left", padx=(8, 0))
 
         search_var = tk.StringVar()
-        search_entry = ttk.Entry(actions, textvariable=search_var, width=22)
-        search_entry.pack(side="left", padx=(18, 0))
+        search_entry = ttk.Entry(actions, textvariable=search_var, width=20, style="Source.TEntry")
+        search_entry.pack(side="left", padx=(16, 0))
 
         def find_next() -> None:
             query = search_var.get().strip()
@@ -3258,7 +3660,7 @@ class StudyApp(tk.Tk):
 
         ttk.Button(
             actions, text="Экспорт в PDF", style="Secondary.TButton", command=export_pdf
-        ).pack(side="left", padx=(10, 0))
+        ).pack(side="left", padx=(8, 0))
 
         tk.Label(
             actions,
@@ -3269,6 +3671,32 @@ class StudyApp(tk.Tk):
         ).pack(side="left", padx=(12, 0))
 
         self._show_screen(screen, animated=True)
+
+    def _open_timestamp_media_or_frame(self, recording: BBBRecording, total_seconds: float) -> None:
+        from .platform_services import PlatformSystemActions
+
+        lec_dir = default_lecture_directory(recording, base_dir=self.app_paths.data_dir)
+        frames_dir = lec_dir / "frames"
+        if frames_dir.is_dir():
+            frames = sorted(frames_dir.glob("frame-*.jpg"))
+            if frames:
+                interval = 60
+                interval_path = frames_dir / "interval-seconds.txt"
+                if interval_path.is_file():
+                    try:
+                        interval = int(interval_path.read_text(encoding="ascii").strip())
+                    except Exception:
+                        pass
+                idx = min(len(frames) - 1, max(0, int(round(total_seconds / max(1, interval)))))
+                PlatformSystemActions().open_in_file_manager(frames[idx])
+                return
+
+        audio_file = lec_dir / "audio.mp4"
+        if audio_file.is_file():
+            PlatformSystemActions().open_in_file_manager(audio_file)
+            return
+
+        PlatformSystemActions().open_in_file_manager(lec_dir)
 
     def _finish_processing_error(self, message: str) -> None:
         self._processing_active = False
@@ -3401,6 +3829,11 @@ class StudyApp(tk.Tk):
 
 def main() -> None:
     app = StudyApp()
+    if "--smoke-test-gui" in sys.argv:
+        app.after(500, app.destroy)
+        app.mainloop()
+        sys.stdout.write("GUI smoke test passed\n")
+        return
     app.mainloop()
 
 

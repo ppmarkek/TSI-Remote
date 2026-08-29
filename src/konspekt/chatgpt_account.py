@@ -25,8 +25,13 @@ from pathlib import Path
 from typing import Any
 
 from .bbb_import import BBBRecording
+from .job_runner import CancellationToken, JobCancelledError, terminate_process_tree
 from .local_pipeline import default_lecture_directory
-from .outbound_context import OutboundContextError, _validate_outbound_text
+from .outbound_context import (
+    OutboundContextError,
+    _validate_outbound_text,
+    validate_provider_context_limits,
+)
 
 
 class ChatGPTAccountError(RuntimeError):
@@ -191,6 +196,7 @@ def generate_lesson_with_chatgpt(
     model: str,
     directory: Path | None = None,
     progress: ProgressCallback | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> ChatGPTGenerationResult:
     """Generate ``lesson.md`` with an isolated Codex exec invocation.
 
@@ -198,6 +204,9 @@ def generate_lesson_with_chatgpt(
     Codex's ``--output-last-message`` file is accepted as the generated lesson,
     and the existing lesson is replaced atomically after validation.
     """
+
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
 
     selected_model = _validated_model_slug(model)
     target = directory or default_lecture_directory(recording)
@@ -212,6 +221,9 @@ def generate_lesson_with_chatgpt(
         forbidden = [recording.meeting_id, recording.source_url]
         _validate_outbound_text("chatgpt_context", context, forbidden)
         _validate_outbound_text("chatgpt_prompt", prompt, forbidden)
+        total_chars = len(prompt) + len(context)
+        total_bytes = len(prompt.encode("utf-8")) + len(context.encode("utf-8"))
+        validate_provider_context_limits("chatgpt", total_chars, total_bytes)
     except OutboundContextError as exc:
         raise ChatGPTAccountError(
             f"Ошибка проверки безопасности передаваемых данных: {exc}"
@@ -227,6 +239,9 @@ def generate_lesson_with_chatgpt(
         f"{context.rstrip()}\n"
         "</lecture_context>\n"
     )
+
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
 
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -273,24 +288,43 @@ def generate_lesson_with_chatgpt(
 
     notify(15, "ChatGPT создаёт структурированный конспект…")
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             command,
-            input=stdin_payload,
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
-            check=False,
-            timeout=_GENERATION_TIMEOUT_SECONDS,
             env=_codex_environment(),
             cwd=str(target),
             creationflags=_hidden_creation_flags(),
         )
-        if result.returncode != 0:
+        if cancellation_token is not None:
+            cancellation_token.register(lambda: terminate_process_tree(proc))
+        try:
+            proc.communicate(input=stdin_payload, timeout=_GENERATION_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            terminate_process_tree(proc)
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                raise JobCancelledError("Операция была отменена пользователем.") from exc
+            raise ChatGPTAccountError(
+                "ChatGPT не завершил конспект за 30 минут. Исходные материалы сохранены."
+            ) from exc
+
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            raise JobCancelledError("Операция была отменена пользователем.")
+
+        if proc.returncode != 0:
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                raise JobCancelledError("Операция была отменена пользователем.")
             raise ChatGPTAccountError(
                 "Codex не смог создать конспект. Проверь вход в ChatGPT и повтори попытку."
             )
+
+        if cancellation_token is not None:
+            cancellation_token.check_cancelled()
+
         try:
             lesson = temporary_path.read_text(encoding="utf-8-sig").strip()
         except (OSError, UnicodeError) as exc:
@@ -301,14 +335,18 @@ def generate_lesson_with_chatgpt(
             raise ChatGPTAccountError(
                 "Codex завершил работу без текста конспекта. Повтори попытку."
             )
+
+        if cancellation_token is not None:
+            cancellation_token.check_cancelled()
+
         notify(92, "Сохраняем готовый конспект…")
         temporary_path.write_text(f"{lesson}\n", encoding="utf-8")
         temporary_path.replace(lesson_path)
-    except subprocess.TimeoutExpired as exc:
-        raise ChatGPTAccountError(
-            "ChatGPT не завершил конспект за 30 минут. Исходные материалы сохранены."
-        ) from exc
+    except (JobCancelledError, ChatGPTAccountError):
+        raise
     except OSError as exc:
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            raise JobCancelledError("Операция была отменена пользователем.") from exc
         raise ChatGPTAccountError(
             "Не удалось запустить Codex CLI или сохранить конспект. Проверь установку Codex."
         ) from exc

@@ -10,6 +10,8 @@ from konspekt.bbb_import import (
     BBBImportError,
     BBBRecording,
     inspect_bbb_recording,
+)
+from konspekt.library_manager import (
     load_library,
     load_library_with_quarantine,
     save_to_library,
@@ -204,7 +206,7 @@ class BBBImportTests(unittest.TestCase):
             )
 
             # Mock quarantine write to fail with PermissionError
-            with patch("konspekt.bbb_import._quarantine_backup", return_value=None):
+            with patch("konspekt.library_manager._quarantine_backup", return_value=None):
                 loaded = load_library(path)
                 self.assertEqual(len(loaded), 1)
                 self.assertEqual(loaded[0].meeting_id, "valid-m")
