@@ -236,45 +236,69 @@ class JobRunner:
         token: CancellationToken | None = None,
     ) -> CancellationToken:
         cancellation_token = token or CancellationToken()
+        event_lock = threading.RLock()
+        terminal_sent = False
+
+        def emit_event(event: JobEvent, *, terminal: bool = False) -> bool:
+            nonlocal terminal_sent
+            with event_lock:
+                if terminal_sent:
+                    return False
+                if terminal:
+                    terminal_sent = True
+                on_event(event)
+                return True
+
+        def emit_cancelled() -> None:
+            emit_event(
+                JobEvent(event_type=JobEventType.CANCELLED, message="Операция отменена."),
+                terminal=True,
+            )
 
         def worker() -> None:
-            on_event(JobEvent(event_type=JobEventType.STARTED, percent=0, message="Запуск задачи…"))
+            emit_event(
+                JobEvent(event_type=JobEventType.STARTED, percent=0, message="Запуск задачи…")
+            )
+            cancellation_token.register(emit_cancelled)
 
             def progress_callback(percent: int, message: str) -> None:
                 if cancellation_token.is_cancelled:
                     raise JobCancelledError("Операция отменена.")
-                on_event(
+                delivered = emit_event(
                     JobEvent(
                         event_type=JobEventType.PROGRESS,
                         percent=percent,
                         message=message,
                     )
                 )
+                if not delivered:
+                    raise JobCancelledError("Операция отменена.")
 
             try:
+                cancellation_token.check_cancelled()
                 result = target_fn(cancellation_token, progress_callback)
                 if cancellation_token.is_cancelled:
-                    on_event(
-                        JobEvent(event_type=JobEventType.CANCELLED, message="Операция отменена.")
-                    )
+                    emit_cancelled()
                 else:
-                    on_event(
+                    emit_event(
                         JobEvent(
                             event_type=JobEventType.COMPLETED,
                             percent=100,
                             message="Задача успешно завершена.",
                             result=result,
-                        )
+                        ),
+                        terminal=True,
                     )
             except JobCancelledError:
-                on_event(JobEvent(event_type=JobEventType.CANCELLED, message="Операция отменена."))
+                emit_cancelled()
             except Exception as exc:
-                on_event(
+                emit_event(
                     JobEvent(
                         event_type=JobEventType.FAILED,
                         error=str(exc),
                         message=f"Ошибка выполнения: {exc}",
-                    )
+                    ),
+                    terminal=True,
                 )
             finally:
                 with self._lock:
