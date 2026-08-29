@@ -84,26 +84,26 @@ from .settings import (
 )
 
 PALETTE = {
-    "canvas": "#F4F7F7",
-    "sidebar": "#20292B",
+    "canvas": "#F6F7FB",
+    "sidebar": "#0F172A",
     "surface": "#FFFFFF",
-    "surface_soft": "#EAF0F0",
-    "ink": "#172124",
-    "muted": "#4C5C60",
-    "faint": "#718084",
-    "line": "#C9D4D6",
-    "primary": "#0A6570",
-    "primary_hover": "#07535D",
-    "primary_pressed": "#063F47",
-    "primary_soft": "#DDECEE",
-    "focus": "#A2482E",
-    "success": "#2E765A",
-    "danger": "#A54242",
-    "sidebar_ink": "#EAF0F0",
-    "sidebar_muted": "#8A9B9E",
-    "sidebar_active": "#2B373A",
-    "sidebar_hover": "#263133",
-    "sidebar_line": "#2C383A",
+    "surface_soft": "#EEF2F7",
+    "ink": "#111827",
+    "muted": "#475569",
+    "faint": "#64748B",
+    "line": "#D7DDE7",
+    "primary": "#2F5BFF",
+    "primary_hover": "#2448CC",
+    "primary_pressed": "#1D3AA3",
+    "primary_soft": "#E8EDFF",
+    "focus": "#B45309",
+    "success": "#167052",
+    "danger": "#B4233C",
+    "sidebar_ink": "#F8FAFC",
+    "sidebar_muted": "#A7B2C3",
+    "sidebar_active": "#25324A",
+    "sidebar_hover": "#1E293B",
+    "sidebar_line": "#263248",
 }
 
 
@@ -170,13 +170,13 @@ class Typography:
 
 
 class StudyApp(tk.Tk):
-    """A quiet archive desktop study workspace."""
+    """A focused desktop workspace for turning recordings into study material."""
 
     def __init__(self) -> None:
         super().__init__()
         self.title("Конспект — учебные материалы")
-        self.geometry("1180x760")
-        self.minsize(980, 660)
+        self.geometry("1240x780")
+        self.minsize(960, 660)
         self.configure(background=PALETTE["canvas"])
 
         self.type = self._create_typography()
@@ -307,8 +307,8 @@ class StudyApp(tk.Tk):
             family = "TkDefaultFont"
         return Typography(
             family=family,
-            title=(family, 22, "bold"),
-            heading=(family, 14, "bold"),
+            title=(family, 24, "bold"),
+            heading=(family, 15, "bold"),
             subheading=(family, 11, "bold"),
             body=(family, 11),
             body_bold=(family, 11, "bold"),
@@ -327,16 +327,16 @@ class StudyApp(tk.Tk):
             borderwidth=0,
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            padding=(16, 9),
+            padding=(17, 10),
         )
         self.style.map(
             "Primary.TButton",
             background=[
-                ("disabled", "#BDCED0"),
+                ("disabled", "#C7D0E4"),
                 ("pressed", PALETTE["primary_pressed"]),
                 ("active", PALETTE["primary_hover"]),
             ],
-            foreground=[("disabled", "#7E9698")],
+            foreground=[("disabled", "#66728A")],
         )
 
         self.style.configure(
@@ -361,13 +361,42 @@ class StudyApp(tk.Tk):
         )
 
         self.style.configure(
+            "Link.TButton",
+            background=PALETTE["surface"],
+            foreground=PALETTE["primary_pressed"],
+            borderwidth=0,
+            focuscolor=PALETTE["focus"],
+            font=self.type.small,
+            padding=(7, 5),
+        )
+        self.style.map(
+            "Link.TButton",
+            background=[("active", PALETTE["primary_soft"])],
+            foreground=[("active", PALETTE["primary_pressed"])],
+        )
+        self.style.configure(
+            "DangerLink.TButton",
+            background=PALETTE["surface"],
+            foreground=PALETTE["danger"],
+            borderwidth=0,
+            focuscolor=PALETTE["focus"],
+            font=self.type.small,
+            padding=(7, 5),
+        )
+        self.style.map(
+            "DangerLink.TButton",
+            background=[("active", "#FCECEF")],
+            foreground=[("active", PALETTE["danger"])],
+        )
+
+        self.style.configure(
             "Nav.TButton",
             background=PALETTE["sidebar"],
             foreground=PALETTE["sidebar_ink"],
             borderwidth=0,
             font=self.type.body,
-            anchor="w",
-            padding=(12, 9),
+            anchor="center",
+            padding=(14, 10),
         )
         self.style.map(
             "Nav.TButton",
@@ -385,13 +414,13 @@ class StudyApp(tk.Tk):
             borderwidth=0,
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            anchor="w",
-            padding=(12, 9),
+            anchor="center",
+            padding=(16, 10),
         )
         self.style.map(
             "SidebarPrimary.TButton",
             background=[
-                ("disabled", "#2C383A"),
+                ("disabled", "#334155"),
                 ("pressed", PALETTE["primary_pressed"]),
                 ("active", PALETTE["primary_hover"]),
             ],
@@ -468,21 +497,21 @@ class StudyApp(tk.Tk):
         )
 
     def _build_shell(self) -> None:
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        sidebar = tk.Frame(
+        topbar = tk.Frame(
             self,
             background=PALETTE["sidebar"],
             highlightbackground=PALETTE["sidebar_line"],
             highlightthickness=1,
-            width=216,
+            height=72,
         )
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.grid_propagate(False)
+        topbar.grid(row=0, column=0, sticky="ew")
+        topbar.grid_propagate(False)
 
-        brand = tk.Frame(sidebar, background=PALETTE["sidebar"])
-        brand.pack(fill="x", padx=20, pady=(24, 20))
+        brand = tk.Frame(topbar, background=PALETTE["sidebar"])
+        brand.pack(side="left", padx=(24, 22), pady=16)
         if self._sidebar_icon is not None:
             tk.Label(
                 brand,
@@ -497,85 +526,64 @@ class StudyApp(tk.Tk):
                 foreground="#FFFFFF",
                 background=PALETTE["primary"],
                 width=2,
-                pady=2,
+                pady=3,
             ).pack(side="left")
         tk.Label(
             brand,
-            text="КОНСПЕКТ",
-            font=(self.type.family, 12, "bold"),
+            text="Конспект",
+            font=(self.type.family, 13, "bold"),
             foreground=PALETTE["sidebar_ink"],
             background=PALETTE["sidebar"],
         ).pack(side="left", padx=(10, 0))
 
-        new_lecture_btn = ttk.Button(
-            sidebar,
-            text="+ Новая лекция",
-            style="SidebarPrimary.TButton",
-            command=self.show_new_lecture,
-        )
-        new_lecture_btn.pack(fill="x", padx=16, pady=(0, 16))
+        tk.Frame(
+            topbar,
+            background=PALETTE["sidebar_line"],
+            width=1,
+            height=28,
+        ).pack(side="left", pady=22)
 
         lectures_button = ttk.Button(
-            sidebar,
-            text="Лекции",
+            topbar,
+            text="Библиотека",
             style="Nav.TButton",
             command=self.show_library,
         )
-        lectures_button.pack(fill="x", padx=16, pady=(0, 4))
+        lectures_button.pack(side="left", padx=(18, 4), pady=15)
         settings_button = ttk.Button(
-            sidebar,
+            topbar,
             text="Настройки",
             style="Nav.TButton",
             command=self.show_settings,
         )
-        settings_button.pack(fill="x", padx=16, pady=(0, 4))
-        self._navigation_buttons.extend((new_lecture_btn, lectures_button, settings_button))
+        settings_button.pack(side="left", padx=4, pady=15)
 
-        footer = tk.Frame(sidebar, background=PALETTE["sidebar"])
-        footer.pack(side="bottom", fill="x", padx=20, pady=20)
-        tk.Label(
-            footer,
-            text="Данные хранятся\nна этом компьютере",
-            justify="left",
-            font=self.type.small,
-            foreground=PALETTE["sidebar_muted"],
-            background=PALETTE["sidebar"],
-        ).pack(anchor="w")
-        ttk.Button(
-            footer,
-            text="Проверка системы",
+        new_lecture_btn = ttk.Button(
+            topbar,
+            text="Новая лекция",
+            style="SidebarPrimary.TButton",
+            command=self.show_new_lecture,
+        )
+        new_lecture_btn.pack(side="right", padx=(8, 24), pady=15)
+        system_button = ttk.Button(
+            topbar,
+            text="Проверить систему",
             style="Nav.TButton",
             command=self.show_system_check_dialog,
-        ).pack(fill="x", pady=(10, 0))
+        )
+        system_button.pack(side="right", padx=4, pady=15)
+        self._navigation_buttons.extend(
+            (new_lecture_btn, lectures_button, settings_button, system_button)
+        )
 
         workspace = tk.Frame(self, background=PALETTE["canvas"])
-        workspace.grid(row=0, column=1, sticky="nsew")
+        workspace.grid(row=1, column=0, sticky="nsew")
         workspace.grid_columnconfigure(0, weight=1)
-        workspace.grid_rowconfigure(1, weight=1)
+        workspace.grid_rowconfigure(0, weight=1)
         self.workspace = workspace
 
-        header = tk.Frame(workspace, background=PALETTE["canvas"], height=64)
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_propagate(False)
-        tk.Label(
-            header,
-            text="Учебные материалы",
-            font=self.type.subheading,
-            foreground=PALETTE["ink"],
-            background=PALETTE["canvas"],
-        ).pack(side="left", padx=36, pady=20)
-        tk.Label(
-            header,
-            text="Обработка записи — локально",
-            font=self.type.small,
-            foreground=PALETTE["primary"],
-            background=PALETTE["primary_soft"],
-            padx=10,
-            pady=4,
-        ).pack(side="right", padx=36, pady=18)
-
         content = tk.Frame(workspace, background=PALETTE["canvas"])
-        content.grid(row=1, column=0, sticky="nsew")
+        content.grid(row=0, column=0, sticky="nsew")
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(0, weight=1)
         self.content = content
@@ -1185,7 +1193,7 @@ class StudyApp(tk.Tk):
 
     def show_library(self, animated: bool = True) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(36, 28, 36, 36))
+        screen.configure(padding=(48, 36, 48, 40))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
@@ -1194,27 +1202,27 @@ class StudyApp(tk.Tk):
         intro.grid_columnconfigure(0, weight=1)
         tk.Label(
             intro,
-            text="Моя библиотека",
+            text="Библиотека лекций",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             intro,
-            text="Все записи, конспекты и материалы по лекциям собраны здесь.",
+            text="Записи, расшифровки и готовые конспекты — в одном рабочем списке.",
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Button(
             intro,
-            text="Новая лекция  →",
+            text="Добавить лекцию",
             style="Primary.TButton",
             command=self.show_new_lecture,
         ).grid(row=0, column=1, rowspan=2, sticky="e")
 
         divider = tk.Frame(screen, background=PALETTE["line"], height=1)
-        divider.grid(row=1, column=0, sticky="ew", pady=(24, 0))
+        divider.grid(row=1, column=0, sticky="ew", pady=(28, 0))
 
         if self.library:
             self._build_library_list(screen)
@@ -1229,43 +1237,96 @@ class StudyApp(tk.Tk):
         empty.grid_columnconfigure(0, weight=1)
         empty.grid_rowconfigure(0, weight=1)
 
-        message = tk.Frame(empty, background=PALETTE["canvas"])
-        message.grid(row=0, column=0)
+        message = tk.Frame(
+            empty,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=36,
+            pady=32,
+        )
+        message.grid(row=0, column=0, sticky="ew", pady=(28, 0))
+        message.grid_columnconfigure(0, weight=1)
+        message.grid_columnconfigure(1, weight=1)
         tk.Label(
             message,
-            text="Библиотека пока пуста",
+            text="Начни с первой лекции",
             font=self.type.heading,
             foreground=PALETTE["ink"],
-            background=PALETTE["canvas"],
-        ).pack()
+            background=PALETTE["surface"],
+        ).grid(row=0, column=0, sticky="w")
         tk.Label(
             message,
-            text="Добавь первую запись — здесь появится её конспект\nи все материалы для повторения.",
-            justify="center",
+            text=(
+                "Добавь запись BigBlueButton или файл с компьютера. "
+                "Материалы останутся локальными, а этапы подготовки будут видны в списке."
+            ),
+            justify="left",
             font=self.type.body,
             foreground=PALETTE["muted"],
-            background=PALETTE["canvas"],
-        ).pack(pady=(8, 20))
+            background=PALETTE["surface"],
+            wraplength=430,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 20), padx=(0, 40))
         ttk.Button(
             message,
             text="Добавить первую лекцию",
-            style="Secondary.TButton",
+            style="Primary.TButton",
             command=self.show_new_lecture,
-        ).pack()
+        ).grid(row=2, column=0, sticky="w")
+
+        steps = tk.Frame(message, background=PALETTE["surface"])
+        steps.grid(row=0, column=1, rowspan=3, sticky="nsew")
+        for index, (title, detail) in enumerate(
+            (
+                ("Добавь источник", "Ссылка BBB или локальный аудио- и видеофайл."),
+                ("Подготовь материалы", "Расшифровка и кадры обрабатываются на компьютере."),
+                ("Открой конспект", "Читай, ищи и переходи по таймкодам."),
+            ),
+            start=1,
+        ):
+            line = tk.Frame(steps, background=PALETTE["surface"])
+            line.pack(fill="x", pady=(0, 13 if index < 3 else 0))
+            tk.Label(
+                line,
+                text=str(index),
+                font=self.type.small,
+                foreground=PALETTE["primary_pressed"],
+                background=PALETTE["primary_soft"],
+                width=3,
+                pady=4,
+            ).pack(side="left", anchor="n")
+            copy = tk.Frame(line, background=PALETTE["surface"])
+            copy.pack(side="left", fill="x", expand=True, padx=(12, 0))
+            tk.Label(
+                copy,
+                text=title,
+                font=self.type.body_bold,
+                foreground=PALETTE["ink"],
+                background=PALETTE["surface"],
+            ).pack(anchor="w")
+            tk.Label(
+                copy,
+                text=detail,
+                font=self.type.small,
+                foreground=PALETTE["muted"],
+                background=PALETTE["surface"],
+                wraplength=350,
+                justify="left",
+            ).pack(anchor="w", pady=(2, 0))
 
     def _build_library_list(self, screen: ttk.Frame) -> None:
         listing = tk.Frame(screen, background=PALETTE["canvas"])
-        listing.grid(row=2, column=0, sticky="nsew", pady=(18, 0))
+        listing.grid(row=2, column=0, sticky="nsew", pady=(22, 0))
         listing.grid_columnconfigure(0, weight=1)
         listing.grid_rowconfigure(2, weight=1)
 
         toolbar = tk.Frame(listing, background=PALETTE["canvas"])
-        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
         toolbar.grid_columnconfigure(0, weight=1)
         search = ttk.Entry(
-            toolbar, textvariable=self._library_query, width=24, style="Source.TEntry"
+            toolbar, textvariable=self._library_query, width=34, style="Source.TEntry"
         )
-        search.grid(row=0, column=0, sticky="ew")
+        search.grid(row=0, column=0, columnspan=3, sticky="ew")
         search.configure(takefocus=True)
         search.bind("<Return>", lambda _: self.show_library(animated=False))
         ttk.Button(
@@ -1273,7 +1334,7 @@ class StudyApp(tk.Tk):
             text="Найти",
             style="Secondary.TButton",
             command=lambda: self.show_library(animated=False),
-        ).grid(row=0, column=1, padx=(8, 0))
+        ).grid(row=0, column=3, padx=(8, 0))
         state_values = (
             "Все состояния",
             "Импортировано",
@@ -1289,7 +1350,7 @@ class StudyApp(tk.Tk):
             width=16,
             style="Settings.TCombobox",
         )
-        state_combo.grid(row=0, column=2, padx=(8, 0))
+        state_combo.grid(row=1, column=0, sticky="w", pady=(10, 0))
         state_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
 
         date_values = ("Все даты", "Сегодня", "За 7 дней", "За 30 дней")
@@ -1301,7 +1362,7 @@ class StudyApp(tk.Tk):
             width=12,
             style="Settings.TCombobox",
         )
-        date_combo.grid(row=0, column=3, padx=(8, 0))
+        date_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
         date_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
 
         sort_combo = ttk.Combobox(
@@ -1312,7 +1373,7 @@ class StudyApp(tk.Tk):
             width=15,
             style="Settings.TCombobox",
         )
-        sort_combo.grid(row=0, column=4, padx=(8, 0))
+        sort_combo.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
         sort_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
 
         ttk.Button(
@@ -1320,7 +1381,7 @@ class StudyApp(tk.Tk):
             text="Корзина",
             style="Secondary.TButton",
             command=self.show_trash_dialog,
-        ).grid(row=0, column=5, padx=(8, 0))
+        ).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=(10, 0))
 
         tk.Label(
             toolbar,
@@ -1328,7 +1389,7 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=0, column=6, padx=(12, 0))
+        ).grid(row=0, column=4, padx=(14, 0))
 
         def _calc_size_worker():
             try:
@@ -1385,7 +1446,12 @@ class StudyApp(tk.Tk):
         scrollbar.grid(row=2, column=1, sticky="ns", padx=(10, 0))
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        rows = tk.Frame(canvas, background=PALETTE["canvas"])
+        rows = tk.Frame(
+            canvas,
+            background=PALETTE["surface"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+        )
         rows.grid_columnconfigure(0, weight=1)
         rows_window = canvas.create_window((0, 0), window=rows, anchor="nw")
         rows.bind(
@@ -1408,12 +1474,10 @@ class StudyApp(tk.Tk):
             row = tk.Frame(
                 rows,
                 background=PALETTE["surface"],
-                highlightbackground=PALETTE["line"],
-                highlightthickness=1,
-                padx=18,
-                pady=14,
+                padx=20,
+                pady=16,
             )
-            row.grid(row=index, column=0, sticky="ew", pady=(0, 6))
+            row.grid(row=index * 2, column=0, sticky="ew")
             row.grid_columnconfigure(0, weight=1)
             tk.Label(
                 row,
@@ -1511,21 +1575,29 @@ class StudyApp(tk.Tk):
             ttk.Button(
                 management,
                 text="Переименовать",
-                style="Secondary.TButton",
+                style="Link.TButton",
                 command=lambda item=recording: self._rename_library_recording(item),
             ).pack(side="left")
             ttk.Button(
                 management,
                 text="В корзину",
-                style="Secondary.TButton",
+                style="DangerLink.TButton",
                 command=lambda item=recording: self._trash_library_recording(item),
             ).pack(side="left", padx=(6, 0))
             ttk.Button(
                 management,
                 text="Открыть папку",
-                style="Secondary.TButton",
+                style="Link.TButton",
                 command=lambda item=recording: self._open_lecture_folder(item),
             ).pack(side="left", padx=(6, 0))
+
+            if index < len(filtered) - 1:
+                tk.Frame(rows, background=PALETTE["line"], height=1).grid(
+                    row=index * 2 + 1,
+                    column=0,
+                    sticky="ew",
+                    padx=20,
+                )
 
         self._bind_mousewheel_tree(canvas, canvas)
 
@@ -1772,7 +1844,7 @@ class StudyApp(tk.Tk):
     def show_new_lecture(self) -> None:
         self._import_status.set("")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(36, 28, 36, 36))
+        screen.configure(padding=(48, 36, 48, 40))
         screen.grid_columnconfigure(0, weight=1)
 
         ttk.Button(
@@ -1788,41 +1860,47 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, sticky="w", pady=(24, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(28, 0))
         tk.Label(
             screen,
-            text="Выбери способ добавления учебного материала.",
+            text="Один экран для ссылки BigBlueButton и файлов с компьютера.",
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=2, column=0, sticky="w", pady=(6, 20))
+        ).grid(row=2, column=0, sticky="w", pady=(6, 24))
 
-        bbb_panel = tk.Frame(
+        source_panel = tk.Frame(
             screen,
             background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=20,
-            pady=18,
+            padx=28,
+            pady=24,
         )
-        bbb_panel.grid(row=3, column=0, sticky="ew")
-        bbb_panel.grid_columnconfigure(0, weight=1)
+        source_panel.grid(row=3, column=0, sticky="ew")
+        source_panel.grid_columnconfigure(0, weight=1)
+        source_panel.grid_columnconfigure(1, weight=0)
         tk.Label(
-            bbb_panel,
-            text="Ссылка на запись BigBlueButton",
+            source_panel,
+            text="BigBlueButton",
             font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["surface"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
-            bbb_panel,
-            text="Видео не будет скачиваться сейчас: сначала сохраним потоки и тексты слайдов в библиотеку.",
+            source_panel,
+            text=(
+                "Вставь ссылку на запись. Сначала приложение проверит источник и добавит "
+                "метаданные; обработку можно запустить позже из библиотеки."
+            ),
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["surface"],
-        ).grid(row=1, column=0, sticky="w", pady=(4, 14))
+            wraplength=720,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 15))
         source_entry = ttk.Entry(
-            bbb_panel,
+            source_panel,
             textvariable=self._bbb_url,
             style="Source.TEntry",
         )
@@ -1831,43 +1909,42 @@ class StudyApp(tk.Tk):
         source_entry.bind("<Return>", lambda _: self.start_bbb_import())
 
         self._import_button = ttk.Button(
-            bbb_panel,
-            text="Проверить и добавить",
+            source_panel,
+            text="Добавить по ссылке",
             style="Primary.TButton",
             command=self.start_bbb_import,
         )
-        self._import_button.grid(row=3, column=0, sticky="w", pady=(14, 0))
+        self._import_button.grid(row=2, column=1, sticky="e", padx=(12, 0))
 
-        file_panel = tk.Frame(
-            screen,
-            background=PALETTE["surface"],
-            highlightbackground=PALETTE["line"],
-            highlightthickness=1,
-            padx=20,
-            pady=18,
+        tk.Frame(source_panel, background=PALETTE["line"], height=1).grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=24,
         )
-        file_panel.grid(row=4, column=0, sticky="ew", pady=(14, 0))
-        file_panel.grid_columnconfigure(0, weight=1)
         tk.Label(
-            file_panel,
-            text="Локальный файл с диска",
+            source_panel,
+            text="Файл с компьютера",
             font=self.type.subheading,
             foreground=PALETTE["ink"],
             background=PALETTE["surface"],
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=4, column=0, sticky="w")
         tk.Label(
-            file_panel,
-            text="Импорт записанной лекции с компьютера (аудио или видео MP4, MP3, WAV, MKV).",
+            source_panel,
+            text="Поддерживаются MP4, MP3, M4A, WAV, MKV, WebM и AAC. Файл не покидает компьютер.",
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["surface"],
-        ).grid(row=1, column=0, sticky="w", pady=(4, 14))
+            wraplength=720,
+            justify="left",
+        ).grid(row=5, column=0, sticky="w", pady=(5, 0))
         ttk.Button(
-            file_panel,
-            text="Выбрать файл с диска",
+            source_panel,
+            text="Выбрать файл",
             style="Secondary.TButton",
             command=self.start_local_media_picker,
-        ).grid(row=2, column=0, sticky="w")
+        ).grid(row=4, column=1, rowspan=2, sticky="e", padx=(12, 0))
 
         self._import_status_label = tk.Label(
             screen,
@@ -1875,11 +1952,11 @@ class StudyApp(tk.Tk):
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-            wraplength=700,
+            wraplength=820,
             justify="left",
         )
         self._import_status_label.grid(
-            row=5,
+            row=4,
             column=0,
             sticky="w",
             pady=(16, 0),
@@ -2148,8 +2225,10 @@ class StudyApp(tk.Tk):
         description: str = "Аудио и кадры будут обработаны на этом компьютере. Платные API не используются.",
     ) -> None:
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(36, 36, 36, 36))
+        screen.configure(padding=(36, 38, 36, 40))
         screen.grid_columnconfigure(0, weight=1)
+        screen.grid_columnconfigure(1, weight=3)
+        screen.grid_columnconfigure(2, weight=1)
 
         tk.Label(
             screen,
@@ -2157,17 +2236,17 @@ class StudyApp(tk.Tk):
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=0, column=1, sticky="w")
 
         panel = tk.Frame(
             screen,
             background=PALETTE["surface"],
             highlightbackground=PALETTE["line"],
             highlightthickness=1,
-            padx=24,
-            pady=24,
+            padx=28,
+            pady=26,
         )
-        panel.grid(row=1, column=0, sticky="ew", pady=(24, 0))
+        panel.grid(row=1, column=1, sticky="ew", pady=(24, 0))
         panel.grid_columnconfigure(0, weight=1)
         tk.Label(
             panel,
@@ -2193,8 +2272,23 @@ class StudyApp(tk.Tk):
             justify="left",
         ).grid(row=2, column=0, sticky="w", pady=(10, 20))
 
+        stage_track = tk.Frame(panel, background=PALETTE["surface_soft"], padx=12, pady=10)
+        stage_track.grid(row=3, column=0, sticky="ew", pady=(0, 18))
+        for index, label in enumerate(("Источник", "Материалы", "Конспект")):
+            stage_track.grid_columnconfigure(index, weight=1)
+            active = index == 1
+            tk.Label(
+                stage_track,
+                text=f"{index + 1}  {label}",
+                font=self.type.small if not active else self.type.body_bold,
+                foreground=PALETTE["primary_pressed"] if active else PALETTE["muted"],
+                background=PALETTE["primary_soft"] if active else PALETTE["surface_soft"],
+                padx=10,
+                pady=5,
+            ).grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 4, 0))
+
         progress_header = tk.Frame(panel, background=PALETTE["surface"])
-        progress_header.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        progress_header.grid(row=4, column=0, sticky="ew", pady=(0, 6))
         progress_header.grid_columnconfigure(0, weight=1)
         tk.Label(
             progress_header,
@@ -2218,7 +2312,7 @@ class StudyApp(tk.Tk):
             value=0,
             style="Processing.Horizontal.TProgressbar",
         )
-        self._processing_progress.grid(row=4, column=0, sticky="ew")
+        self._processing_progress.grid(row=5, column=0, sticky="ew")
         self._processing_status_label = tk.Label(
             panel,
             textvariable=self._processing_status,
@@ -2228,17 +2322,17 @@ class StudyApp(tk.Tk):
             justify="left",
             wraplength=720,
         )
-        self._processing_status_label.grid(row=5, column=0, sticky="w", pady=(16, 0))
+        self._processing_status_label.grid(row=6, column=0, sticky="w", pady=(16, 0))
         tk.Label(
             panel,
             textvariable=self._processing_activity,
             font=self.type.small,
             foreground=PALETTE["faint"],
             background=PALETTE["surface"],
-        ).grid(row=6, column=0, sticky="w", pady=(6, 16))
+        ).grid(row=7, column=0, sticky="w", pady=(6, 16))
 
         actions = tk.Frame(panel, background=PALETTE["surface"])
-        actions.grid(row=7, column=0, sticky="w")
+        actions.grid(row=8, column=0, sticky="w")
         self._processing_retry_button = ttk.Button(
             actions,
             text="Повторить",
@@ -2270,7 +2364,7 @@ class StudyApp(tk.Tk):
             background=PALETTE["surface"],
             wraplength=720,
             justify="left",
-        ).grid(row=8, column=0, sticky="w", pady=(14, 0))
+        ).grid(row=9, column=0, sticky="w", pady=(14, 0))
 
         self._show_screen(screen, animated=True)
         self._start_processing_heartbeat()
@@ -3367,7 +3461,7 @@ class StudyApp(tk.Tk):
     def show_lesson_editor(self, recording: BBBRecording) -> None:
         self._lesson_status.set("")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(36, 28, 36, 36))
+        screen.configure(padding=(48, 32, 48, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(3, weight=1)
 
@@ -3476,7 +3570,7 @@ class StudyApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             screen,
-            text="Готовый конспект",
+            text="Конспект",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
@@ -3484,8 +3578,8 @@ class StudyApp(tk.Tk):
         tk.Label(
             screen,
             text=recording.title,
-            font=self.type.body_bold,
-            foreground=PALETTE["muted"],
+            font=self.type.heading,
+            foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=2, column=0, sticky="w", pady=(6, 16))
 
@@ -3493,18 +3587,37 @@ class StudyApp(tk.Tk):
         reader_area.grid(row=3, column=0, sticky="nsew")
         reader_area.grid_rowconfigure(0, weight=1)
         reader_area.grid_columnconfigure(1, weight=1)
-        toc_list = tk.Listbox(
+        toc_panel = tk.Frame(
             reader_area,
-            width=28,
+            background=PALETTE["surface_soft"],
+            highlightbackground=PALETTE["line"],
+            highlightthickness=1,
+            padx=14,
+            pady=14,
+        )
+        toc_panel.grid(row=0, column=0, sticky="ns", padx=(0, 14))
+        tk.Label(
+            toc_panel,
+            text="Содержание",
+            font=self.type.subheading,
+            foreground=PALETTE["ink"],
+            background=PALETTE["surface_soft"],
+        ).pack(anchor="w", pady=(0, 10))
+        toc_list = tk.Listbox(
+            toc_panel,
+            width=26,
             exportselection=False,
             background=PALETTE["surface_soft"],
             foreground=PALETTE["ink"],
-            relief="solid",
-            borderwidth=1,
+            relief="flat",
+            borderwidth=0,
             highlightthickness=0,
             font=self.type.small,
+            activestyle="none",
+            selectbackground=PALETTE["primary_soft"],
+            selectforeground=PALETTE["primary_pressed"],
         )
-        toc_list.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+        toc_list.pack(fill="both", expand=True)
         reader = scrolledtext.ScrolledText(
             reader_area,
             font=self.type.body,
@@ -3513,8 +3626,8 @@ class StudyApp(tk.Tk):
             relief="solid",
             borderwidth=1,
             wrap="word",
-            padx=20,
-            pady=18,
+            padx=34,
+            pady=28,
         )
         reader.grid(row=0, column=1, sticky="nsew")
         reader.insert("1.0", content)
@@ -3570,7 +3683,7 @@ class StudyApp(tk.Tk):
         ttk.Button(
             actions,
             text="Изменить конспект",
-            style="Secondary.TButton",
+            style="Primary.TButton",
             command=lambda: self.show_lesson_editor(recording),
         ).pack(side="left")
 
@@ -3606,14 +3719,14 @@ class StudyApp(tk.Tk):
         ttk.Button(
             actions,
             text="Экспорт в HTML",
-            style="Secondary.TButton",
+            style="Link.TButton",
             command=export_html,
         ).pack(side="left", padx=(8, 0))
 
         ttk.Button(
             actions,
             text="Экспорт архива (.zip)",
-            style="Secondary.TButton",
+            style="Link.TButton",
             command=export_zip,
         ).pack(side="left", padx=(8, 0))
 
@@ -3636,7 +3749,7 @@ class StudyApp(tk.Tk):
                 reader.see(found)
                 reader.mark_set("insert", found)
 
-        ttk.Button(actions, text="Найти", style="Secondary.TButton", command=find_next).pack(
+        ttk.Button(actions, text="Найти", style="Link.TButton", command=find_next).pack(
             side="left", padx=(6, 0)
         )
 
@@ -3658,9 +3771,9 @@ class StudyApp(tk.Tk):
             except RuntimeError as exc:
                 messagebox.showerror("Экспорт PDF", str(exc))
 
-        ttk.Button(
-            actions, text="Экспорт в PDF", style="Secondary.TButton", command=export_pdf
-        ).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Экспорт в PDF", style="Link.TButton", command=export_pdf).pack(
+            side="left", padx=(8, 0)
+        )
 
         tk.Label(
             actions,
