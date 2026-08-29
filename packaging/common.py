@@ -37,8 +37,6 @@ def collect_shared_packaging_info(
     assets_dir = project_root / "assets"
     if (assets_dir / "konspekt.png").is_file():
         datas.append((str(assets_dir / "konspekt.png"), "assets"))
-    if (assets_dir / "konspekt.svg").is_file():
-        datas.append((str(assets_dir / "konspekt.svg"), "assets"))
 
     tesseract_executable = shutil.which("tesseract")
     if not tesseract_executable:

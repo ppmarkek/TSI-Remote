@@ -1,48 +1,63 @@
-"""Generate the PNG and ICO runtime assets from the Konspekt icon design."""
+"""Build platform icons from the approved raster artwork."""
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "assets" / "konspekt-source.png"
 PNG = ROOT / "assets" / "konspekt.png"
 ICO = ROOT / "assets" / "konspekt.ico"
+ICNS = ROOT / "assets" / "konspekt.icns"
 
 CANVAS = 256
-GREEN = "#176B45"
-PAPER = "#F7FAF8"
-FOLD = "#CDE4D6"
-FOLD_LINE = "#A4CEB4"
+MAC_CANVAS = 1024
+BACKGROUND = (255, 255, 255, 255)
 
 
-def _rounded(
-    draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], radius: int, fill: str
-) -> None:
-    draw.rounded_rectangle(box, radius=radius, fill=fill)
+def _content_bounds(image: Image.Image) -> tuple[int, int, int, int]:
+    """Find the black/green mark while ignoring the near-white source canvas."""
+    luminance = image.convert("L")
+    foreground = luminance.point(lambda value: 255 if value < 240 else 0)
+    bounds = foreground.getbbox()
+    if bounds is None:
+        raise ValueError(f"No visible artwork found in {SOURCE}")
+    return bounds
 
 
-def build_icon() -> Image.Image:
-    image = Image.new("RGBA", (CANVAS, CANVAS), GREEN)
-    draw = ImageDraw.Draw(image)
-    _rounded(draw, (0, 0, CANVAS - 1, CANVAS - 1), 56, GREEN)
-    _rounded(draw, (61, 47, 183, 209), 16, PAPER)
-    draw.polygon([(153, 47), (183, 77), (153, 77)], fill=FOLD)
-    draw.line([(153, 47), (153, 77), (183, 77)], fill=FOLD_LINE, width=9, joint="curve")
-    for y, width in ((112, 74), (139, 74), (166, 43)):
-        draw.ellipse((63, y - 7, 77, y + 7), fill=GREEN)
-        draw.line([(91, y), (91 + width, y)], fill=GREEN, width=13)
-    return image
+def _prepare_master() -> Image.Image:
+    source = Image.open(SOURCE).convert("RGBA")
+    left, top, right, bottom = _content_bounds(source)
+
+    # Retain the supplied geometry, but remove the oversized export canvas.
+    artwork = source.crop((left, top, right, bottom))
+    longest_edge = max(artwork.size)
+    padding = round(longest_edge * 0.16)
+    square_edge = longest_edge + 2 * padding
+    master = Image.new("RGBA", (square_edge, square_edge), BACKGROUND)
+    position = (
+        (square_edge - artwork.width) // 2,
+        (square_edge - artwork.height) // 2,
+    )
+    master.alpha_composite(artwork, position)
+    return master
+
+
+def render_icon(output_size: int) -> Image.Image:
+    return _prepare_master().resize((output_size, output_size), Image.Resampling.LANCZOS)
 
 
 def main() -> None:
-    icon = build_icon()
-    icon.save(PNG, format="PNG")
-    icon.save(
+    runtime_icon = render_icon(CANVAS)
+    mac_icon = render_icon(MAC_CANVAS)
+    runtime_icon.save(PNG, format="PNG")
+    runtime_icon.save(
         ICO,
         format="ICO",
         sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)],
     )
-    print(f"Wrote {PNG} and {ICO}")
+    mac_icon.save(ICNS, format="ICNS")
+    print(f"Wrote {PNG}, {ICO}, and {ICNS} from {SOURCE}")
 
 
 if __name__ == "__main__":
