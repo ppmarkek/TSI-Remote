@@ -42,9 +42,7 @@ def collect_shared_packaging_info(
 
     tesseract_executable = shutil.which("tesseract")
     if not tesseract_executable:
-        raise RuntimeError(
-            "Tesseract is required for a release package but was not found on PATH."
-        )
+        raise RuntimeError("Tesseract is required for a release package but was not found on PATH.")
 
     tesseract_root = Path(tesseract_executable).parent
     binaries.append((tesseract_executable, "tesseract"))
@@ -52,9 +50,7 @@ def collect_shared_packaging_info(
         tesseract_root / "tessdata",
         tesseract_root.parent / "share" / "tessdata",
     )
-    tessdata = next(
-        (candidate for candidate in tessdata_candidates if candidate.is_dir()), None
-    )
+    tessdata = next((candidate for candidate in tessdata_candidates if candidate.is_dir()), None)
     if tessdata is None:
         raise RuntimeError("Tesseract tessdata directory was not found on the build host.")
 

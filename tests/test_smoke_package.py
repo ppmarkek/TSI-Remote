@@ -94,21 +94,15 @@ class SmokePackageTests(unittest.TestCase):
         self.assertFalse(run_gui)
         self.assertIn("SSH", reason)
 
-        run_gui, _ = _is_macos_graphical_session(
-            {"SSH_CLIENT": "10.0.0.1 52222 22"}
-        )
+        run_gui, _ = _is_macos_graphical_session({"SSH_CLIENT": "10.0.0.1 52222 22"})
         self.assertFalse(run_gui)
 
     def test_should_run_gui_smoke_linux_display_check(self) -> None:
         self.assertFalse(_is_linux_graphical_session({})[0])
         self.assertTrue(_is_linux_graphical_session({"DISPLAY": ":0"})[0])
-        self.assertTrue(
-            _is_linux_graphical_session({"WAYLAND_DISPLAY": "wayland-0"})[0]
-        )
+        self.assertTrue(_is_linux_graphical_session({"WAYLAND_DISPLAY": "wayland-0"})[0])
         self.assertFalse(should_run_gui_smoke(env={}, platform="linux")[0])
-        self.assertTrue(
-            should_run_gui_smoke(env={"DISPLAY": ":0"}, platform="linux")[0]
-        )
+        self.assertTrue(should_run_gui_smoke(env={"DISPLAY": ":0"}, platform="linux")[0])
 
     def test_tesseract_language_discovery_reads_nonempty_models(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
