@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 240" role="img" aria-labelledby="title desc">
+  <title id="title">Konspekt</title>
+  <desc id="desc">Konspekt wordmark for dark backgrounds with a calm green K monogram.</desc>
+  <g transform="translate(24 24) scale(.75)">
+    <rect width="256" height="256" rx="58" fill="#176B45"/>
+    <rect x="54" y="43" width="30" height="170" rx="15" fill="#F7FAF8"/>
+    <path d="M84 128 169 48" fill="none" stroke="#CDE4D6" stroke-width="31" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M84 128 177 207" fill="none" stroke="#F7FAF8" stroke-width="31" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="86" cy="128" r="10" fill="#A4CEB4"/>
+  </g>
+  <text x="252" y="148" fill="#F7FAF8" font-family="Segoe UI Variable, Segoe UI, Inter, Arial, sans-serif" font-size="80" font-weight="700" letter-spacing="-2">Konspekt</text>
+</svg>

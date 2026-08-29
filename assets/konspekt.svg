@@ -1,12 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
   <title id="title">Konspekt</title>
-  <desc id="desc">A calm green note with a focused study mark.</desc>
-  <rect width="256" height="256" rx="56" fill="#176B45"/>
-  <path d="M77 47h76l30 30v116c0 9-7 16-16 16H77c-9 0-16-7-16-16V63c0-9 7-16 16-16Z" fill="#F7FAF8"/>
-  <path d="M153 47v30h30" fill="#CDE4D6"/>
-  <path d="M153 47v30h30" fill="none" stroke="#A4CEB4" stroke-linejoin="round" stroke-width="9"/>
-  <path d="M91 112h74M91 139h74M91 166h43" fill="none" stroke="#176B45" stroke-linecap="round" stroke-width="13"/>
-  <circle cx="70" cy="112" r="6.5" fill="#176B45"/>
-  <circle cx="70" cy="139" r="6.5" fill="#176B45"/>
-  <circle cx="70" cy="166" r="6.5" fill="#176B45"/>
+  <desc id="desc">A calm K monogram with a recording point becoming a structured note.</desc>
+  <rect width="256" height="256" rx="58" fill="#176B45"/>
+  <rect x="54" y="43" width="30" height="170" rx="15" fill="#F7FAF8"/>
+  <path d="M84 128 169 48" fill="none" stroke="#CDE4D6" stroke-width="31" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 128 177 207" fill="none" stroke="#F7FAF8" stroke-width="31" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="86" cy="128" r="10" fill="#A4CEB4"/>
 </svg>
