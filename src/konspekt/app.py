@@ -300,16 +300,16 @@ class StudyApp(tk.Tk):
     def _load_sidebar_icon(self) -> tk.PhotoImage | None:
         """Load a compact rounded icon for the top-bar brand area.
 
-        Uses a dedicated sidebar asset when available, otherwise falls back to
-        down-sampling the main app icon.
+        The asset is already sized at 32×32 px so no sub-sampling is needed.
+        On macOS Retina (2×) it renders as 16 logical points — crisp and
+        proportional to the navigation text.  On 1× / Windows it renders at
+        32 px which fits the topbar comfortably.
         """
         try:
-            sidebar = tk.PhotoImage(file=asset_path("konspekt-sidebar.png"))
-            # 128 / 5 ≈ 26 px – compact enough for the top bar.
-            return sidebar.subsample(5, 5)
+            return tk.PhotoImage(file=asset_path("konspekt-sidebar.png"))
         except tk.TclError:
             if self._app_icon is not None:
-                return self._app_icon.subsample(10, 10)
+                return self._app_icon.subsample(16, 16)
             return None
 
     def _create_typography(self) -> Typography:
@@ -433,7 +433,7 @@ class StudyApp(tk.Tk):
             borderwidth=0,
             font=self.type.body,
             anchor="center",
-            padding=(14, 10),
+            padding=(10, 6),
         )
         self.style.map(
             "Nav.TButton",
@@ -452,7 +452,7 @@ class StudyApp(tk.Tk):
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
             anchor="center",
-            padding=(16, 10),
+            padding=(12, 6),
         )
         self.style.map(
             "SidebarPrimary.TButton",
@@ -542,13 +542,13 @@ class StudyApp(tk.Tk):
             background=PALETTE["sidebar"],
             highlightbackground=PALETTE["sidebar_line"],
             highlightthickness=1,
-            height=56,
+            height=48,
         )
         topbar.grid(row=0, column=0, sticky="ew")
         topbar.grid_propagate(False)
 
         brand = tk.Frame(topbar, background=PALETTE["sidebar"])
-        brand.pack(side="left", padx=(20, 18), pady=10)
+        brand.pack(side="left", padx=(16, 14), pady=8)
         if self._sidebar_icon is not None:
             tk.Label(
                 brand,
@@ -568,17 +568,17 @@ class StudyApp(tk.Tk):
         tk.Label(
             brand,
             text="Конспект",
-            font=(self.type.family, 13, "bold"),
+            font=(self.type.family, 12, "bold"),
             foreground=PALETTE["sidebar_ink"],
             background=PALETTE["sidebar"],
-        ).pack(side="left", padx=(10, 0))
+        ).pack(side="left", padx=(7, 0))
 
         tk.Frame(
             topbar,
             background=PALETTE["sidebar_line"],
             width=1,
-            height=24,
-        ).pack(side="left", pady=16)
+            height=20,
+        ).pack(side="left", pady=14)
 
         lectures_button = ttk.Button(
             topbar,
@@ -586,14 +586,14 @@ class StudyApp(tk.Tk):
             style="Nav.TButton",
             command=self.show_library,
         )
-        lectures_button.pack(side="left", padx=(14, 4), pady=10)
+        lectures_button.pack(side="left", padx=(12, 3), pady=8)
         settings_button = ttk.Button(
             topbar,
             text="Настройки",
             style="Nav.TButton",
             command=self.show_settings,
         )
-        settings_button.pack(side="left", padx=4, pady=10)
+        settings_button.pack(side="left", padx=3, pady=8)
 
         new_lecture_btn = ttk.Button(
             topbar,
@@ -601,14 +601,14 @@ class StudyApp(tk.Tk):
             style="SidebarPrimary.TButton",
             command=self.show_new_lecture,
         )
-        new_lecture_btn.pack(side="right", padx=(8, 20), pady=10)
+        new_lecture_btn.pack(side="right", padx=(6, 16), pady=8)
         system_button = ttk.Button(
             topbar,
             text="Проверить систему",
             style="Nav.TButton",
             command=self.show_system_check_dialog,
         )
-        system_button.pack(side="right", padx=4, pady=10)
+        system_button.pack(side="right", padx=3, pady=8)
         self._navigation_buttons.extend(
             (new_lecture_btn, lectures_button, settings_button, system_button)
         )
