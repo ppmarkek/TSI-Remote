@@ -173,15 +173,28 @@ class StudyApp(tk.Tk):
     """A focused desktop workspace for turning recordings into study material."""
 
     def __init__(self) -> None:
+        # Enable DPI awareness on Windows so the app renders crisply on HiDPI screens.
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                pass
         super().__init__()
         self.title("Конспект — учебные материалы")
         self.geometry("1240x780")
         self.minsize(960, 660)
         self.configure(background=PALETTE["canvas"])
+        # Improve font rendering on Windows.
+        if sys.platform == "win32":
+            try:
+                self.tk.call("tk", "scaling", self.winfo_fpixels("1i") / 72)
+            except tk.TclError:
+                pass
 
         self.type = self._create_typography()
         self._app_icon = self._load_app_icon()
-        self._sidebar_icon = self._app_icon.subsample(8, 8) if self._app_icon else None
+        self._sidebar_icon = self._load_sidebar_icon()
         if self._app_icon is not None:
             self.iconphoto(True, self._app_icon)
         self.style = ttk.Style(self)
@@ -284,6 +297,21 @@ class StudyApp(tk.Tk):
         except tk.TclError:
             return None
 
+    def _load_sidebar_icon(self) -> tk.PhotoImage | None:
+        """Load a compact rounded icon for the top-bar brand area.
+
+        Uses a dedicated sidebar asset when available, otherwise falls back to
+        down-sampling the main app icon.
+        """
+        try:
+            sidebar = tk.PhotoImage(file=asset_path("konspekt-sidebar.png"))
+            # 128 / 5 ≈ 26 px – compact enough for the top bar.
+            return sidebar.subsample(5, 5)
+        except tk.TclError:
+            if self._app_icon is not None:
+                return self._app_icon.subsample(10, 10)
+            return None
+
     def _create_typography(self) -> Typography:
         from .platform_services import PlatformAppearancePreferences
 
@@ -305,20 +333,29 @@ class StudyApp(tk.Tk):
             family = "Arial"
         else:
             family = "TkDefaultFont"
+        # Windows Segoe UI renders about 1pt visually larger than macOS
+        # Helvetica Neue at the same nominal size.  Subtract 1pt on Windows
+        # so that both platforms look proportionally identical.
+        d = -1 if sys.platform == "win32" else 0
         return Typography(
             family=family,
-            title=(family, 24, "bold"),
-            heading=(family, 15, "bold"),
-            subheading=(family, 11, "bold"),
-            body=(family, 11),
-            body_bold=(family, 11, "bold"),
-            secondary=(family, 10),
-            small=(family, 10),
+            title=(family, 24 + d, "bold"),
+            heading=(family, 15 + d, "bold"),
+            subheading=(family, 11 + d, "bold"),
+            body=(family, 11 + d),
+            body_bold=(family, 11 + d, "bold"),
+            secondary=(family, 10 + d),
+            small=(family, 10 + d),
         )
 
     def _configure_styles(self) -> None:
         self.style.theme_use("clam")
         self.style.configure("TFrame", background=PALETTE["canvas"])
+        # Windows: widen scrollbars to match native feel and suppress
+        # the dotted focus rectangle that looks out of place.
+        if sys.platform == "win32":
+            self.style.configure("Vertical.TScrollbar", width=14)
+            self.style.configure("Horizontal.TScrollbar", width=14)
 
         self.style.configure(
             "Primary.TButton",
@@ -505,13 +542,13 @@ class StudyApp(tk.Tk):
             background=PALETTE["sidebar"],
             highlightbackground=PALETTE["sidebar_line"],
             highlightthickness=1,
-            height=72,
+            height=56,
         )
         topbar.grid(row=0, column=0, sticky="ew")
         topbar.grid_propagate(False)
 
         brand = tk.Frame(topbar, background=PALETTE["sidebar"])
-        brand.pack(side="left", padx=(24, 22), pady=16)
+        brand.pack(side="left", padx=(20, 18), pady=10)
         if self._sidebar_icon is not None:
             tk.Label(
                 brand,
@@ -540,8 +577,8 @@ class StudyApp(tk.Tk):
             topbar,
             background=PALETTE["sidebar_line"],
             width=1,
-            height=28,
-        ).pack(side="left", pady=22)
+            height=24,
+        ).pack(side="left", pady=16)
 
         lectures_button = ttk.Button(
             topbar,
@@ -549,14 +586,14 @@ class StudyApp(tk.Tk):
             style="Nav.TButton",
             command=self.show_library,
         )
-        lectures_button.pack(side="left", padx=(18, 4), pady=15)
+        lectures_button.pack(side="left", padx=(14, 4), pady=10)
         settings_button = ttk.Button(
             topbar,
             text="Настройки",
             style="Nav.TButton",
             command=self.show_settings,
         )
-        settings_button.pack(side="left", padx=4, pady=15)
+        settings_button.pack(side="left", padx=4, pady=10)
 
         new_lecture_btn = ttk.Button(
             topbar,
@@ -564,14 +601,14 @@ class StudyApp(tk.Tk):
             style="SidebarPrimary.TButton",
             command=self.show_new_lecture,
         )
-        new_lecture_btn.pack(side="right", padx=(8, 24), pady=15)
+        new_lecture_btn.pack(side="right", padx=(8, 20), pady=10)
         system_button = ttk.Button(
             topbar,
             text="Проверить систему",
             style="Nav.TButton",
             command=self.show_system_check_dialog,
         )
-        system_button.pack(side="right", padx=4, pady=15)
+        system_button.pack(side="right", padx=4, pady=10)
         self._navigation_buttons.extend(
             (new_lecture_btn, lectures_button, settings_button, system_button)
         )
@@ -611,7 +648,11 @@ class StudyApp(tk.Tk):
         """Scroll a canvas even while the pointer is over one of its child controls."""
 
         def scroll(event: tk.Event) -> str:
-            canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            # macOS sends delta ±1, Windows sends delta ±120.
+            if sys.platform == "win32":
+                canvas.yview_scroll(-1 * (event.delta // 120), "units")
+            else:
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
             return "break"
 
         pending: list[tk.Misc] = [root]
@@ -3935,9 +3976,21 @@ class StudyApp(tk.Tk):
 
     @staticmethod
     def _reduce_motion() -> bool:
-        # Tk does not expose the Windows accessibility preference portably.
-        # A command-line escape hatch keeps motion optional for now.
-        return "--reduce-motion" in sys.argv
+        if "--reduce-motion" in sys.argv:
+            return True
+        # Honour the Windows "Show animations" accessibility toggle.
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                SPI_GETCLIENTAREAANIMATION = 0x1042
+                result = ctypes.c_bool()
+                ctypes.windll.user32.SystemParametersInfoW(
+                    SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(result), 0,
+                )
+                return not result.value
+            except Exception:
+                pass
+        return False
 
 
 def main() -> None:
