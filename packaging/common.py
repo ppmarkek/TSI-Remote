@@ -5,6 +5,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+REQUIRED_TESSERACT_MODELS = ("eng.traineddata", "rus.traineddata")
+
 
 def get_project_roots(spec_path: str) -> tuple[Path, Path, Path]:
     project_root = (
@@ -38,23 +40,37 @@ def collect_shared_packaging_info(
     if (assets_dir / "konspekt.svg").is_file():
         datas.append((str(assets_dir / "konspekt.svg"), "assets"))
 
-    # Bundle a local Tesseract binary and language data when the build host
-    # provides one.  The runtime smoke test treats OCR as a required package
-    # dependency, so a missing host binary fails the release gate explicitly.
     tesseract_executable = shutil.which("tesseract")
-    if tesseract_executable:
-        tesseract_root = Path(tesseract_executable).parent
-        binaries.append((tesseract_executable, "tesseract"))
-        tessdata_candidates = (
-            tesseract_root / "tessdata",
-            tesseract_root.parent / "share" / "tessdata",
+    if not tesseract_executable:
+        raise RuntimeError(
+            "Tesseract is required for a release package but was not found on PATH."
         )
-        tessdata = next(
-            (candidate for candidate in tessdata_candidates if candidate.is_dir()), None
+
+    tesseract_root = Path(tesseract_executable).parent
+    binaries.append((tesseract_executable, "tesseract"))
+    tessdata_candidates = (
+        tesseract_root / "tessdata",
+        tesseract_root.parent / "share" / "tessdata",
+    )
+    tessdata = next(
+        (candidate for candidate in tessdata_candidates if candidate.is_dir()), None
+    )
+    if tessdata is None:
+        raise RuntimeError("Tesseract tessdata directory was not found on the build host.")
+
+    missing_models = [
+        model
+        for model in REQUIRED_TESSERACT_MODELS
+        if not (tessdata / model).is_file() or (tessdata / model).stat().st_size <= 0
+    ]
+    if missing_models:
+        raise RuntimeError(
+            "Required Tesseract language models are missing: " + ", ".join(missing_models)
         )
-        if tessdata is not None:
-            for language_file in tessdata.glob("*.traineddata"):
-                datas.append((str(language_file), "tesseract/tessdata"))
+
+    for language_file in sorted(tessdata.glob("*.traineddata")):
+        if language_file.is_file() and language_file.stat().st_size > 0:
+            datas.append((str(language_file), "tesseract/tessdata"))
 
     try:
         from PyInstaller.utils.hooks import collect_all, collect_data_files
@@ -68,10 +84,10 @@ def collect_shared_packaging_info(
             "huggingface_hub",
         ):
             try:
-                p_datas, p_binaries, p_hidden = collect_all(package)
-                datas.extend(p_datas)
-                binaries.extend(p_binaries)
-                hiddenimports.extend(p_hidden)
+                package_datas, package_binaries, package_hidden = collect_all(package)
+                datas.extend(package_datas)
+                binaries.extend(package_binaries)
+                hiddenimports.extend(package_hidden)
             except Exception:
                 pass
 

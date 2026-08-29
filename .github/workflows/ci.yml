@@ -45,6 +45,8 @@ jobs:
     name: Package (${{ matrix.os }})
     needs: test
     runs-on: ${{ matrix.os }}
+    env:
+      TESSDATA_REF: 87416418657359cb625c412a48b6e1d6d41c29bd
     strategy:
       fail-fast: false
       matrix:
@@ -68,12 +70,50 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tesseract
 
+      - name: Install Russian OCR model (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tessdata_dir="$(brew --prefix)/share/tessdata"
+          mkdir -p "$tessdata_dir"
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${TESSDATA_REF}/rus.traineddata" \
+            --output "$tessdata_dir/rus.traineddata"
+          test -s "$tessdata_dir/eng.traineddata"
+          test -s "$tessdata_dir/rus.traineddata"
+          tesseract --list-langs 2>&1 | grep -qx eng
+          tesseract --list-langs 2>&1 | grep -qx rus
+
       - name: Install Tesseract OCR runtime (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install tesseract -y --no-progress
           "$env:ProgramFiles\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install Russian OCR model (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tesseractRoot = Join-Path $env:ProgramFiles "Tesseract-OCR"
+          $tessdataDir = Join-Path $tesseractRoot "tessdata"
+          $rusModel = Join-Path $tessdataDir "rus.traineddata"
+          New-Item -ItemType Directory -Force -Path $tessdataDir | Out-Null
+          $uri = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/$env:TESSDATA_REF/rus.traineddata"
+          Invoke-WebRequest -Uri $uri -OutFile $rusModel
+          $engModel = Join-Path $tessdataDir "eng.traineddata"
+          if (-not (Test-Path $engModel) -or (Get-Item $engModel).Length -le 0) {
+            throw "English Tesseract language model is missing."
+          }
+          if (-not (Test-Path $rusModel) -or (Get-Item $rusModel).Length -le 0) {
+            throw "Russian Tesseract language model is missing."
+          }
+          $tesseract = Join-Path $tesseractRoot "tesseract.exe"
+          $languages = & $tesseract --list-langs 2>&1 | ForEach-Object { "$_".Trim() }
+          if ($languages -notcontains "eng" -or $languages -notcontains "rus") {
+            throw "Tesseract did not load both eng and rus language models."
+          }
 
       - name: Build application package
         run: python scripts/build_package.py

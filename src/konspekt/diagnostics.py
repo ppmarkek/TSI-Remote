@@ -54,12 +54,12 @@ def _rotate_if_needed(path: Path) -> None:
 
 
 def collect_system_diagnostics(app_paths: PlatformAppPaths | None = None) -> dict[str, Any]:
-    """Collect non-secret environment and subsystem health metrics for smoke tests and diagnostics."""
+    """Collect non-secret environment and subsystem health metrics."""
+
     paths = app_paths or PlatformAppPaths()
     locator = PlatformDependencyLocator()
 
-    # Check directory writability
-    dirs_health: dict[str, bool] = {}
+    directories_health: dict[str, bool] = {}
     for name, directory in (
         ("data_dir", paths.data_dir),
         ("cache_dir", paths.cache_dir),
@@ -71,16 +71,17 @@ def collect_system_diagnostics(app_paths: PlatformAppPaths | None = None) -> dic
             test_file = directory / ".healthcheck.tmp"
             test_file.write_text("ok", encoding="utf-8")
             test_file.unlink(missing_ok=True)
-            dirs_health[name] = True
+            directories_health[name] = True
         except OSError:
-            dirs_health[name] = False
+            directories_health[name] = False
 
-    ffmpeg_bin = locator.find_ffmpeg()
-    tesseract_bin = locator.find_tesseract()
-    codex_bin = locator.find_codex()
+    ffmpeg_binary = locator.find_ffmpeg()
+    tesseract_binary = locator.find_tesseract()
+    codex_binary = locator.find_codex()
+    tesseract_languages = _installed_tesseract_languages(tesseract_binary)
 
     return {
-        "status": "ok" if all(dirs_health.values()) else "degraded",
+        "status": "ok" if all(directories_health.values()) else "degraded",
         "timestamp": datetime.now(UTC).isoformat(),
         "platform": {
             "system": sys.platform,
@@ -90,10 +91,34 @@ def collect_system_diagnostics(app_paths: PlatformAppPaths | None = None) -> dic
         },
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
         "webview_gui": webview_gui_for_platform(),
-        "directories_writable": dirs_health,
+        "directories_writable": directories_health,
         "dependencies": {
-            "ffmpeg_available": bool(ffmpeg_bin),
-            "tesseract_available": bool(tesseract_bin),
-            "codex_available": bool(codex_bin),
+            "ffmpeg_available": bool(ffmpeg_binary),
+            "tesseract_available": bool(tesseract_binary),
+            "tesseract_languages": tesseract_languages,
+            "codex_available": bool(codex_binary),
         },
     }
+
+
+def _installed_tesseract_languages(executable: str | None) -> list[str]:
+    """Read language model names from the tessdata directory used by Tesseract."""
+
+    if not executable:
+        return []
+    executable_root = Path(executable).resolve().parent
+    candidates = (
+        executable_root / "tessdata",
+        executable_root.parent / "share" / "tessdata",
+    )
+    for directory in candidates:
+        if not directory.is_dir():
+            continue
+        languages = sorted(
+            path.stem
+            for path in directory.glob("*.traineddata")
+            if path.is_file() and path.stat().st_size > 0
+        )
+        if languages:
+            return languages
+    return []
