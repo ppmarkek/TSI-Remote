@@ -21,6 +21,7 @@ SUPPORTED_PROVIDERS = ("openai", "deepseek")
 SUPPORTED_WHISPER_MODELS = ("tiny", "base", "small")
 SUPPORTED_FRAME_INTERVALS = (30, 60, 90)
 SERVICE_NAME = "Konspekt"
+SECRET_ACCOUNT = "api_key"
 
 
 class SettingsError(RuntimeError):
@@ -60,7 +61,12 @@ def load_settings(
     path: Path | None = None,
     secret_store: SecretStore | None = None,
 ) -> AppSettings:
-    """Load settings and retrieve the API key from the keyring or legacy store."""
+    """Load preferences and retrieve the API key from the secure store.
+
+    Legacy DPAPI data is removed from ``settings.json`` only after the key was
+    written to the target store and read back successfully.  A locked or
+    unavailable keychain therefore cannot destroy the only durable copy.
+    """
 
     settings_path = path or default_settings_path()
     if not settings_path.is_file():
@@ -97,23 +103,28 @@ def load_settings(
     if protected_key:
         try:
             decrypted = _unprotect_secret(protected_key)
-            if decrypted:
-                api_key = decrypted
-                try:
-                    store.set_secret(SERVICE_NAME, "api_key", decrypted)
-                except SecretStoreError:
-                    pass
-                payload.pop("api_key_protected", None)
-                try:
-                    atomic_write_json(settings_path, payload, ensure_ascii=False, indent=2)
-                except (AtomicIOError, OSError):
-                    pass
         except SettingsError:
-            api_key = ""
+            decrypted = ""
+        if decrypted:
+            api_key = decrypted
+            if _store_and_verify_secret(store, decrypted):
+                sanitized_payload = dict(payload)
+                sanitized_payload.pop("api_key_protected", None)
+                try:
+                    atomic_write_json(
+                        settings_path,
+                        sanitized_payload,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                except (AtomicIOError, OSError):
+                    # The secure-store copy is already verified. Keeping the
+                    # legacy field merely causes another idempotent migration.
+                    pass
 
     if not api_key:
         try:
-            retrieved = store.get_secret(SERVICE_NAME, "api_key")
+            retrieved = store.get_secret(SERVICE_NAME, SECRET_ACCOUNT)
             if retrieved:
                 api_key = retrieved
         except SecretStoreError as exc:
@@ -139,7 +150,7 @@ def save_settings(
     path: Path | None = None,
     secret_store: SecretStore | None = None,
 ) -> Path:
-    """Atomically save preferences and store the API key in the platform SecretStore."""
+    """Atomically save preferences and store the API key in the platform keyring."""
 
     validated = _validated(settings)
     settings_path = path or default_settings_path()
@@ -151,9 +162,11 @@ def save_settings(
     store = secret_store or KeyringSecretStore()
     try:
         if api_key:
-            store.set_secret(SERVICE_NAME, "api_key", api_key)
+            store.set_secret(SERVICE_NAME, SECRET_ACCOUNT, api_key)
+            if store.get_secret(SERVICE_NAME, SECRET_ACCOUNT) != api_key:
+                raise SecretStoreError("Системное хранилище не подтвердило запись ключа.")
         else:
-            store.delete_secret(SERVICE_NAME, "api_key")
+            store.delete_secret(SERVICE_NAME, SECRET_ACCOUNT)
     except SecretStoreError as exc:
         raise SettingsError(
             "Не удалось сохранить API-ключ в системном хранилище. "
@@ -165,6 +178,14 @@ def save_settings(
     except (AtomicIOError, OSError) as exc:
         raise SettingsError("Не удалось сохранить настройки приложения.") from exc
     return settings_path
+
+
+def _store_and_verify_secret(store: SecretStore, secret: str) -> bool:
+    try:
+        store.set_secret(SERVICE_NAME, SECRET_ACCOUNT, secret)
+        return store.get_secret(SERVICE_NAME, SECRET_ACCOUNT) == secret
+    except SecretStoreError:
+        return False
 
 
 def _validated(settings: AppSettings) -> AppSettings:

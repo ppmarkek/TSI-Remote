@@ -15,6 +15,7 @@ from .atomic_io import AtomicIOError, atomic_write_json
 
 MANIFEST_SCHEMA_VERSION = 1
 ALGORITHM_VERSION = "1.0.0"
+_VALID_STAGE_STATUSES = {"pending", "completed", "failed"}
 
 
 class ManifestError(RuntimeError):
@@ -22,8 +23,9 @@ class ManifestError(RuntimeError):
 
 
 def compute_lecture_id(source_url: str, meeting_id: str) -> str:
-    """Generate a stable, unique lecture ID based on normalized origin and meeting ID."""
-    clean_meeting = re.sub(r"[^\w\-.]", "_", meeting_id.strip())
+    """Generate a stable, unique lecture ID from normalized origin and meeting ID."""
+
+    clean_meeting = re.sub(r"[^\w\-.]", "_", meeting_id.strip()) or "lecture"
     try:
         parsed = urlparse(source_url)
         host = (parsed.hostname or parsed.netloc).strip().lower()
@@ -37,25 +39,29 @@ def compute_lecture_id(source_url: str, meeting_id: str) -> str:
     except Exception:
         origin = source_url.strip().lower()
 
-    combined = f"{origin}:{meeting_id.strip()}".encode()
+    combined = f"{origin}:{meeting_id.strip()}".encode("utf-8")
     origin_hash = hashlib.sha256(combined).hexdigest()[:12]
     return f"{clean_meeting[:40]}-{origin_hash}"
 
 
 def file_sha256(path: Path) -> str:
-    """Compute the SHA-256 hex digest of a file on disk."""
-    if not path.is_file():
+    """Compute the SHA-256 hex digest of a regular, non-symlink file."""
+
+    if not path.is_file() or path.is_symlink():
         return ""
     hasher = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(65536), b""):
-            hasher.update(chunk)
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                hasher.update(chunk)
+    except OSError:
+        return ""
     return hasher.hexdigest()
 
 
 @dataclass
 class ManifestStage:
-    """Represents the execution state, parameters, and artifact hashes for a pipeline stage."""
+    """Execution state, parameters, and artifact hashes for one pipeline stage."""
 
     status: str = "pending"
     completed_at: str | None = None
@@ -63,19 +69,26 @@ class ManifestStage:
     outputs: dict[str, str] = field(default_factory=dict)
 
     def is_valid(self, expected_fingerprint: dict[str, Any], base_dir: Path) -> bool:
-        """Verify that the stage succeeded with identical parameters and all output files are intact."""
-        if self.status != "completed":
-            return False
-        if self.fingerprint != expected_fingerprint:
+        if self.status != "completed" or self.fingerprint != expected_fingerprint:
             return False
         if not self.outputs:
             return False
-        for rel_path, expected_hash in self.outputs.items():
-            target_path = base_dir / rel_path
-            if not target_path.is_file():
+
+        base = base_dir.resolve()
+        for relative_name, expected_hash in self.outputs.items():
+            if not expected_hash or not _is_safe_relative_path(relative_name):
                 return False
-            actual_hash = file_sha256(target_path)
-            if actual_hash != expected_hash:
+            candidate = base_dir / relative_name
+            if candidate.is_symlink():
+                return False
+            target = candidate.resolve(strict=False)
+            try:
+                target.relative_to(base)
+            except ValueError:
+                return False
+            if not target.is_file():
+                return False
+            if file_sha256(target) != expected_hash:
                 return False
         return True
 
@@ -103,9 +116,7 @@ class LectureManifest:
         base_dir: Path,
     ) -> bool:
         stage = self.stages.get(stage_name)
-        if stage is None:
-            return False
-        return stage.is_valid(expected_fingerprint, base_dir)
+        return bool(stage and stage.is_valid(expected_fingerprint, base_dir))
 
     def record_stage_success(
         self,
@@ -149,44 +160,68 @@ class LectureManifest:
 
     @classmethod
     def load(cls, path: Path) -> LectureManifest:
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink():
             raise ManifestError(f"Файл манифеста не существует: {path}")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ManifestError("Не удалось прочитать файл манифеста.") from exc
-
         if not isinstance(payload, dict):
             raise ManifestError("Повреждённый формат манифеста.")
 
-        lecture_id = str(payload.get("lecture_id", "")).strip()
-        meeting_id = str(payload.get("meeting_id", "")).strip()
+        schema_version = payload.get("schema_version", MANIFEST_SCHEMA_VERSION)
+        if type(schema_version) is not int or schema_version != MANIFEST_SCHEMA_VERSION:
+            raise ManifestError("Неподдерживаемая версия схемы манифеста.")
+
+        lecture_id = _required_string(payload, "lecture_id")
+        meeting_id = _required_string(payload, "meeting_id")
         source_url = str(payload.get("source_url", "")).strip()
-        if not lecture_id or not meeting_id:
-            raise ManifestError("Манифест не содержит обязательных идентификаторов.")
+        created_at = str(payload.get("created_at", "")).strip()
 
         stages_raw = payload.get("stages", {})
+        if not isinstance(stages_raw, dict):
+            raise ManifestError("Поле stages в манифесте повреждено.")
+
         stages: dict[str, ManifestStage] = {}
-        if isinstance(stages_raw, dict):
-            for name, data in stages_raw.items():
-                if isinstance(data, dict):
-                    stages[str(name)] = ManifestStage(
-                        status=str(data.get("status", "pending")),
-                        completed_at=data.get("completed_at"),
-                        fingerprint=data.get("fingerprint", {})
-                        if isinstance(data.get("fingerprint"), dict)
-                        else {},
-                        outputs=data.get("outputs", {})
-                        if isinstance(data.get("outputs"), dict)
-                        else {},
-                    )
+        for raw_name, raw_stage in stages_raw.items():
+            name = str(raw_name).strip()
+            if not name or not isinstance(raw_stage, dict):
+                raise ManifestError("Манифест содержит повреждённый этап.")
+
+            status = str(raw_stage.get("status", "pending"))
+            if status not in _VALID_STAGE_STATUSES:
+                raise ManifestError(f"Этап {name} содержит неизвестный статус.")
+
+            completed_at_raw = raw_stage.get("completed_at")
+            if completed_at_raw is not None and not isinstance(completed_at_raw, str):
+                raise ManifestError(f"Этап {name} содержит неверную дату завершения.")
+
+            fingerprint = raw_stage.get("fingerprint", {})
+            outputs = raw_stage.get("outputs", {})
+            if not isinstance(fingerprint, dict) or not isinstance(outputs, dict):
+                raise ManifestError(f"Этап {name} содержит неверные fingerprint/outputs.")
+
+            normalized_outputs: dict[str, str] = {}
+            for raw_path, raw_hash in outputs.items():
+                relative_path = str(raw_path)
+                digest = str(raw_hash)
+                if not _is_safe_relative_path(relative_path) or not digest:
+                    raise ManifestError(f"Этап {name} содержит небезопасный output.")
+                normalized_outputs[relative_path] = digest
+
+            stages[name] = ManifestStage(
+                status=status,
+                completed_at=completed_at_raw,
+                fingerprint=fingerprint,
+                outputs=normalized_outputs,
+            )
 
         return cls(
             lecture_id=lecture_id,
             meeting_id=meeting_id,
             source_url=source_url,
-            schema_version=int(payload.get("schema_version", MANIFEST_SCHEMA_VERSION)),
-            created_at=str(payload.get("created_at", "")),
+            schema_version=schema_version,
+            created_at=created_at,
             stages=stages,
         )
 
@@ -198,6 +233,7 @@ class LectureManifest:
         source_url: str,
         directory: Path,
     ) -> LectureManifest:
+        del recording_title  # Reserved for future schema versions.
         manifest_path = directory / "lecture-manifest.json"
         lecture_id = compute_lecture_id(source_url, meeting_id)
         if manifest_path.is_file():
@@ -207,9 +243,24 @@ class LectureManifest:
                     return loaded
             except ManifestError:
                 pass
-        manifest = cls(
+        return cls(
             lecture_id=lecture_id,
             meeting_id=meeting_id,
             source_url=source_url,
         )
-        return manifest
+
+
+def _required_string(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ManifestError(f"Манифест не содержит обязательного поля {key}.")
+    return value.strip()
+
+
+def _is_safe_relative_path(value: str) -> bool:
+    if not value or "\x00" in value:
+        return False
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return False
+    return True

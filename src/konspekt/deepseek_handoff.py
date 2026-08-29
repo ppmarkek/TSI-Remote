@@ -30,6 +30,7 @@ class DeepSeekHandoff:
     context_path: Path
     prompt_path: Path
     instructions_path: Path
+    forbidden_values: tuple[str, ...] = ()
 
 
 def prepare_deepseek_handoff(
@@ -48,24 +49,20 @@ def prepare_deepseek_handoff(
             "Сначала собери пакет контекста: не найдены " + ", ".join(missing) + "."
         )
 
-    try:
-        context_text = context_path.read_text(encoding="utf-8")
-        prompt_text = prompt_path.read_text(encoding="utf-8")
-        forbidden = tuple(f for f in (recording.meeting_id, recording.source_url) if f)
-        _validate_outbound_text("deepseek_context", context_text, forbidden)
-        _validate_outbound_text("deepseek_prompt", prompt_text, forbidden)
-        total_chars = len(prompt_text) + len(context_text)
-        total_bytes = len(prompt_text.encode("utf-8")) + len(context_text.encode("utf-8"))
-        validate_provider_context_limits("deepseek_web", total_chars, total_bytes)
-    except OutboundContextError as exc:
-        raise DeepSeekHandoffError(f"Ошибка проверки безопасности файлов передачи: {exc}") from exc
-    except OSError as exc:
-        raise DeepSeekHandoffError("Не удалось прочитать пакет контекста.") from exc
+    forbidden = tuple(
+        value.strip()
+        for value in (recording.meeting_id, recording.source_url)
+        if value and value.strip()
+    )
+    _validate_handoff_files(context_path, prompt_path, forbidden)
 
-    instructions_text = _render_handoff_instructions(recording.title)
     instructions_path = target / "deepseek-handoff.md"
     try:
-        atomic_write_text(instructions_path, instructions_text, encoding="utf-8")
+        atomic_write_text(
+            instructions_path,
+            _render_handoff_instructions(recording.title),
+            encoding="utf-8",
+        )
     except (AtomicIOError, OSError) as exc:
         raise DeepSeekHandoffError(f"Не удалось записать файл инструкций handoff: {exc}") from exc
 
@@ -74,6 +71,7 @@ def prepare_deepseek_handoff(
         context_path=context_path,
         prompt_path=prompt_path,
         instructions_path=instructions_path,
+        forbidden_values=forbidden,
     )
 
 
@@ -84,26 +82,27 @@ def launch_deepseek_handoff(
     open_directory: Callable[[Path], None] | None = None,
     recording: BBBRecording | None = None,
 ) -> None:
-    """Open DeepSeek and the local context folder; the user chooses the chat and sends."""
+    """Validate again, then open DeepSeek and the local context directory.
 
-    if not handoff.context_path.is_file() or not handoff.prompt_path.is_file():
-        raise DeepSeekHandoffError("Пакет контекста больше недоступен в локальной папке.")
+    Exact source identifiers captured at preparation time are immutable members
+    of ``DeepSeekHandoff``.  The final check therefore remains effective even
+    when the UI launches without passing a recording object and even if a file
+    was modified between the consent step and browser launch.
+    """
 
-    try:
-        context_text = handoff.context_path.read_text(encoding="utf-8")
-        prompt_text = handoff.prompt_path.read_text(encoding="utf-8")
-        forbidden = ()
-        if recording is not None:
-            forbidden = tuple(f for f in (recording.meeting_id, recording.source_url) if f)
-        _validate_outbound_text("deepseek_context", context_text, forbidden)
-        _validate_outbound_text("deepseek_prompt", prompt_text, forbidden)
-        total_chars = len(prompt_text) + len(context_text)
-        total_bytes = len(prompt_text.encode("utf-8")) + len(context_text.encode("utf-8"))
-        validate_provider_context_limits("deepseek_web", total_chars, total_bytes)
-    except OutboundContextError as exc:
-        raise DeepSeekHandoffError(f"Ошибка проверки безопасности файлов передачи: {exc}") from exc
-    except OSError as exc:
-        raise DeepSeekHandoffError("Не удалось прочитать пакет контекста перед отправкой.") from exc
+    forbidden = list(handoff.forbidden_values)
+    if recording is not None:
+        forbidden.extend(
+            value.strip()
+            for value in (recording.meeting_id, recording.source_url)
+            if value and value.strip()
+        )
+    _validate_handoff_files(
+        handoff.context_path,
+        handoff.prompt_path,
+        tuple(dict.fromkeys(forbidden)),
+        before_launch=True,
+    )
 
     try:
         opened = open_url(DEEPSEEK_URL)
@@ -114,6 +113,36 @@ def launch_deepseek_handoff(
         raise DeepSeekHandoffError("Не удалось открыть DeepSeek или папку с материалами.") from exc
     except RuntimeError as exc:
         raise DeepSeekHandoffError("Не удалось открыть DeepSeek в браузере по умолчанию.") from exc
+
+
+def _validate_handoff_files(
+    context_path: Path,
+    prompt_path: Path,
+    forbidden: tuple[str, ...],
+    *,
+    before_launch: bool = False,
+) -> None:
+    if not context_path.is_file() or not prompt_path.is_file():
+        message = (
+            "Пакет контекста больше недоступен в локальной папке."
+            if before_launch
+            else "Сначала собери локальный пакет контекста."
+        )
+        raise DeepSeekHandoffError(message)
+
+    try:
+        context_text = context_path.read_text(encoding="utf-8")
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        _validate_outbound_text("deepseek_context", context_text, forbidden)
+        _validate_outbound_text("deepseek_prompt", prompt_text, forbidden)
+        total_chars = len(prompt_text) + len(context_text)
+        total_bytes = len(prompt_text.encode("utf-8")) + len(context_text.encode("utf-8"))
+        validate_provider_context_limits("deepseek_web", total_chars, total_bytes)
+    except OutboundContextError as exc:
+        raise DeepSeekHandoffError(f"Ошибка проверки безопасности файлов передачи: {exc}") from exc
+    except OSError as exc:
+        suffix = " перед отправкой" if before_launch else ""
+        raise DeepSeekHandoffError(f"Не удалось прочитать пакет контекста{suffix}.") from exc
 
 
 def _open_in_file_manager(directory: Path) -> None:

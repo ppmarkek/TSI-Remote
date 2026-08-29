@@ -1,7 +1,9 @@
-"""Durable background job runner with cancellation tokens and subprocess termination."""
+"""Background job runner with cooperative cancellation and process-tree cleanup."""
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -49,11 +51,14 @@ class CancellationToken:
             if self._cancelled.is_set():
                 return
             self._cancelled.set()
-            callbacks = list(self._callbacks)
-        for cb in callbacks:
+            callbacks = tuple(self._callbacks)
+            self._callbacks.clear()
+        for callback in callbacks:
             try:
-                cb()
+                callback()
             except Exception:
+                # Cancellation must continue even if one cleanup callback is
+                # already stale or its resource has closed itself.
                 pass
 
     def check_cancelled(self) -> None:
@@ -61,36 +66,167 @@ class CancellationToken:
             raise JobCancelledError("Операция была отменена пользователем.")
 
     def register(self, callback: Callable[[], None]) -> None:
+        call_now = False
         with self._lock:
             if self._cancelled.is_set():
+                call_now = True
+            else:
+                self._callbacks.append(callback)
+        # Do not execute arbitrary cleanup code while holding the token lock.
+        if call_now:
+            try:
                 callback()
-                return
-            self._callbacks.append(callback)
+            except Exception:
+                pass
 
 
 def terminate_process_tree(
     process: subprocess.Popen[Any], grace_period_seconds: float = 2.0
 ) -> None:
-    """Terminate a subprocess gracefully, falling back to kill if it does not exit."""
+    """Terminate a process and every descendant on Windows, macOS, and Linux.
+
+    Existing call sites do not create dedicated process groups, so this helper
+    discovers descendants explicitly.  Windows delegates to ``taskkill /T``;
+    POSIX systems snapshot the parent/child table with ``ps`` and signal the
+    deepest descendants before the root process.
+    """
+
     if process.poll() is not None:
         return
+    if os.name == "nt":
+        _terminate_windows_tree(process, grace_period_seconds)
+    else:
+        _terminate_posix_tree(process, grace_period_seconds)
+
+
+def _terminate_windows_tree(
+    process: subprocess.Popen[Any], grace_period_seconds: float
+) -> None:
+    pid = process.pid
     try:
-        process.terminate()
-    except OSError:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=max(1.0, grace_period_seconds),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    if _wait_for_root_exit(process, grace_period_seconds):
         return
-    deadline = time.monotonic() + grace_period_seconds
+
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=max(1.0, grace_period_seconds),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+        except OSError:
+            pass
+    _wait_for_root_exit(process, max(0.2, grace_period_seconds))
+
+
+def _terminate_posix_tree(
+    process: subprocess.Popen[Any], grace_period_seconds: float
+) -> None:
+    descendants = _posix_descendant_pids(process.pid)
+    targets = [*descendants, process.pid]
+    _signal_pids(targets, signal.SIGTERM)
+
+    deadline = time.monotonic() + max(0.0, grace_period_seconds)
     while time.monotonic() < deadline:
-        if process.poll() is not None:
+        process.poll()
+        if not any(_pid_exists(pid) for pid in targets):
             return
         time.sleep(0.05)
+
+    _signal_pids(targets, signal.SIGKILL)
+    _wait_for_root_exit(process, max(0.2, grace_period_seconds))
+
+
+def _posix_descendant_pids(root_pid: int) -> list[int]:
+    """Return descendants in deepest-first order from one process-table snapshot."""
+
     try:
-        process.kill()
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+
+    children_by_parent: dict[int, list[int]] = {}
+    for raw_line in result.stdout.splitlines():
+        fields = raw_line.split()
+        if len(fields) != 2:
+            continue
+        try:
+            pid, parent = (int(fields[0]), int(fields[1]))
+        except ValueError:
+            continue
+        children_by_parent.setdefault(parent, []).append(pid)
+
+    ordered: list[int] = []
+    visited: set[int] = set()
+
+    def visit(parent: int) -> None:
+        for child in children_by_parent.get(parent, ()):
+            if child in visited:
+                continue
+            visited.add(child)
+            visit(child)
+            ordered.append(child)
+
+    visit(root_pid)
+    return ordered
+
+
+def _signal_pids(pids: list[int], sig: signal.Signals) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
     except OSError:
-        pass
+        return False
+    return True
+
+
+def _wait_for_root_exit(process: subprocess.Popen[Any], timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return True
+        time.sleep(0.05)
+    return process.poll() is not None
 
 
 class JobRunner:
-    """Manages execution of background operations with orderly events and safe cancellation."""
+    """Manage background operations with orderly events and safe cancellation."""
 
     def __init__(self) -> None:
         self._active_threads: list[threading.Thread] = []
@@ -160,7 +296,7 @@ class JobRunner:
 
     def cancel_all(self) -> None:
         with self._lock:
-            tokens = list(self._active_tokens)
+            tokens = tuple(self._active_tokens)
         for token in tokens:
             token.cancel()
 
@@ -169,7 +305,7 @@ class JobRunner:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             with self._lock:
-                alive = [t for t in self._active_threads if t.is_alive()]
+                alive = [thread for thread in self._active_threads if thread.is_alive()]
             if not alive:
                 return
             time.sleep(0.05)

@@ -1,4 +1,4 @@
-"""Platform-aware directory structure using platformdirs with test isolation."""
+"""Platform-aware directory structure with deterministic test overrides."""
 
 from __future__ import annotations
 
@@ -8,12 +8,16 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import platformdirs
-
 
 @dataclass(frozen=True)
 class PlatformAppPaths:
-    """Manages application paths across Windows, macOS, and Linux with testing support."""
+    """Manage application paths across Windows, macOS, and Linux.
+
+    ``system_override`` is a genuine target-platform override rather than a
+    cosmetic flag.  This makes cross-platform tests deterministic even when a
+    macOS path is evaluated on Windows or Linux, and avoids consulting
+    ``platformdirs`` for the host operating system by mistake.
+    """
 
     app_name: str = "Konspekt"
     app_author: str = "Konspekt"
@@ -22,7 +26,12 @@ class PlatformAppPaths:
 
     @property
     def _system(self) -> str:
-        return self.system_override or sys.platform
+        value = (self.system_override or sys.platform).lower()
+        if value.startswith("win"):
+            return "win32"
+        if value == "darwin":
+            return "darwin"
+        return "linux"
 
     @property
     def data_dir(self) -> Path:
@@ -31,16 +40,13 @@ class PlatformAppPaths:
         configured = os.environ.get("KONSPEKT_DATA_DIR", "").strip()
         if configured:
             return Path(configured).expanduser()
-        # A caller may provide LOCALAPPDATA explicitly in an isolated test or
-        # Windows-compatible runtime.  Never use it when macOS is selected
-        # explicitly; macOS otherwise follows platformdirs.
-        if "LOCALAPPDATA" in os.environ and (
-            self.system_override is None or self._system == "win32"
-        ):
-            return Path(os.environ["LOCALAPPDATA"]) / self.app_name
+        if self._system == "darwin":
+            return Path.home() / "Library" / "Application Support" / self.app_name
         if self._system == "win32":
-            return Path.home() / "AppData" / "Local" / self.app_name
-        return Path(platformdirs.user_data_dir(self.app_name, self.app_author))
+            return self._windows_local_appdata() / self.app_name
+        xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
+        root = Path(xdg_data).expanduser() if xdg_data else Path.home() / ".local" / "share"
+        return root / self.app_name
 
     @property
     def cache_dir(self) -> Path:
@@ -49,7 +55,13 @@ class PlatformAppPaths:
         configured = os.environ.get("KONSPEKT_CACHE_DIR", "").strip()
         if configured:
             return Path(configured).expanduser()
-        return Path(platformdirs.user_cache_dir(self.app_name, self.app_author))
+        if self._system == "darwin":
+            return Path.home() / "Library" / "Caches" / self.app_name
+        if self._system == "win32":
+            return self._windows_local_appdata() / self.app_name / "Cache"
+        xdg_cache = os.environ.get("XDG_CACHE_HOME", "").strip()
+        root = Path(xdg_cache).expanduser() if xdg_cache else Path.home() / ".cache"
+        return root / self.app_name
 
     @property
     def log_dir(self) -> Path:
@@ -58,7 +70,13 @@ class PlatformAppPaths:
         configured = os.environ.get("KONSPEKT_LOG_DIR", "").strip()
         if configured:
             return Path(configured).expanduser()
-        return Path(platformdirs.user_log_dir(self.app_name, self.app_author))
+        if self._system == "darwin":
+            return Path.home() / "Library" / "Logs" / self.app_name
+        if self._system == "win32":
+            return self._windows_local_appdata() / self.app_name / "Logs"
+        xdg_state = os.environ.get("XDG_STATE_HOME", "").strip()
+        root = Path(xdg_state).expanduser() if xdg_state else Path.home() / ".local" / "state"
+        return root / self.app_name / "log"
 
     @property
     def temp_dir(self) -> Path:
@@ -96,3 +114,10 @@ class PlatformAppPaths:
             self.diagnostic_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _windows_local_appdata() -> Path:
+        configured = os.environ.get("LOCALAPPDATA", "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return Path.home() / "AppData" / "Local"

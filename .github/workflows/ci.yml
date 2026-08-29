@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, "work/**" ]
+    branches: [main, "work/**"]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   test:
@@ -13,8 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-13, macos-14 ]
-        python-version: [ "3.10", "3.11", "3.12" ]
+        os: [ubuntu-latest, windows-latest, macos-14]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +23,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: "pip"
+          cache: pip
 
       - name: Install dependencies
         run: |
@@ -38,9 +38,8 @@ jobs:
       - name: Run unit tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-          PYTHONPATH: "src"
-        run: |
-          python -m unittest discover -s tests -v
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
 
   build-artifacts:
     name: Package (${{ matrix.os }})
@@ -49,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ windows-latest, macos-13, macos-14 ]
+        os: [windows-latest, macos-14]
 
     steps:
       - uses: actions/checkout@v4
@@ -58,39 +57,31 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
+          cache: pip
 
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e ".[dev,local-ai]"
 
-      - name: Install Tesseract OCR runtime
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus
-
-      - name: Install Tesseract OCR runtime
+      - name: Install Tesseract OCR runtime (macOS)
         if: runner.os == 'macOS'
         run: brew install tesseract
 
-      - name: Install Tesseract OCR runtime
+      - name: Install Tesseract OCR runtime (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install tesseract -y --no-progress
           "$env:ProgramFiles\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build Application Package
-        run: |
-          python scripts/build_package.py
+      - name: Build application package
+        run: python scripts/build_package.py
 
-      - name: Smoke Test Built Package
-        run: |
-          python scripts/smoke_package.py
+      - name: Smoke-test built package
+        run: python scripts/smoke_package.py
 
-      - name: Upload Package Artifact
+      - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.os }}

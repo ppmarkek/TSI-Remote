@@ -1,50 +1,62 @@
-"""Clean HTML and printable document export for generated lesson notes."""
+"""Safe HTML and portable PDF export for generated lesson notes."""
 
 from __future__ import annotations
 
 import html
+import io
+import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from .atomic_io import AtomicIOError, atomic_write_text
 from .markdown_reader import extract_table_of_contents, sanitize_markdown_text
 
 
-def render_lesson_html(
-    title: str,
-    markdown_content: str,
-) -> str:
-    """Render a standalone, sanitized HTML document with typography and table of contents."""
+def render_lesson_html(title: str, markdown_content: str) -> str:
+    """Render a standalone, escaped HTML document with a table of contents."""
+
     clean_title = sanitize_markdown_text(title.strip())
     toc = extract_table_of_contents(markdown_content)
-
-    toc_html = (
-        "<ul>\n"
-        + "\n".join(
-            f'  <li style="margin-left: {(entry.level - 1) * 20}px;">{html.escape(entry.title)}</li>'
-            for entry in toc
-        )
-        + "\n</ul>"
+    toc_items = "\n".join(
+        f'      <li class="level-{min(6, max(1, entry.level))}">{html.escape(entry.title)}</li>'
+        for entry in toc
     )
+    toc_html = f"<ul>\n{toc_items}\n    </ul>" if toc_items else "<p>Разделы не найдены.</p>"
 
-    # Transform markdown lines into simple safe paragraphs/headings
-    body_lines: list[str] = []
-    for line in markdown_content.splitlines():
-        line = line.strip()
+    body_parts: list[str] = []
+    list_open = False
+
+    def close_list() -> None:
+        nonlocal list_open
+        if list_open:
+            body_parts.append("</ul>")
+            list_open = False
+
+    for raw_line in markdown_content.splitlines():
+        line = raw_line.strip()
         if not line:
+            close_list()
             continue
         if line.startswith("#"):
-            level = min(6, line.count("#", 0, line.find(" ")))
-            text = line.lstrip("#").strip()
-            body_lines.append(f"<h{level}>{html.escape(text)}</h{level}>")
-        elif line.startswith("- ") or line.startswith("* "):
-            body_lines.append(f"<li>{html.escape(line[2:].strip())}</li>")
+            close_list()
+            prefix, separator, heading = line.partition(" ")
+            level = min(6, len(prefix)) if separator and set(prefix) == {"#"} else 0
+            if level:
+                body_parts.append(f"<h{level}>{html.escape(heading.strip())}</h{level}>")
+                continue
+        if line.startswith(("- ", "* ")):
+            if not list_open:
+                body_parts.append("<ul>")
+                list_open = True
+            body_parts.append(f"<li>{html.escape(line[2:].strip())}</li>")
         else:
-            body_lines.append(f"<p>{html.escape(line)}</p>")
+            close_list()
+            body_parts.append(f"<p>{html.escape(line)}</p>")
+    close_list()
 
-    body_html = "\n".join(body_lines)
-
+    body_html = "\n    ".join(body_parts)
     return f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -61,9 +73,22 @@ def render_lesson_html(
       padding: 0 24px;
     }}
     h1, h2, h3 {{ color: #176B45; }}
-    pre, code {{ font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; background: #F3F6F4; padding: 2px 6px; border-radius: 4px; }}
-    .toc {{ background: #F7FAF8; padding: 18px 24px; border-radius: 8px; border: 1px solid #DDE5E0; margin-bottom: 32px; }}
-    ul {{ list-style-type: disc; padding-left: 20px; }}
+    pre, code {{
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background: #F3F6F4;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }}
+    .toc {{
+      background: #F7FAF8;
+      padding: 18px 24px;
+      border-radius: 8px;
+      border: 1px solid #DDE5E0;
+      margin-bottom: 32px;
+    }}
+    .toc .level-2 {{ margin-left: 18px; }}
+    .toc .level-3, .toc .level-4, .toc .level-5, .toc .level-6 {{ margin-left: 36px; }}
+    ul {{ padding-left: 24px; }}
     @media print {{
       body {{ margin: 0; max-width: none; }}
       .toc {{ break-after: page; }}
@@ -72,13 +97,13 @@ def render_lesson_html(
 </head>
 <body>
   <h1>{html.escape(clean_title)}</h1>
-  <div class="toc">
-    <h3>Оглавление</h3>
+  <nav class="toc" aria-label="Оглавление">
+    <h2>Оглавление</h2>
     {toc_html}
-  </div>
-  <div class="content">
+  </nav>
+  <main>
     {body_html}
-  </div>
+  </main>
 </body>
 </html>
 """
@@ -89,7 +114,8 @@ def export_lesson_to_html_file(
     markdown_content: str,
     output_path: Path,
 ) -> Path:
-    """Save the rendered HTML lesson atomically to disk."""
+    """Save the rendered HTML lesson atomically."""
+
     rendered = render_lesson_html(title, markdown_content)
     try:
         atomic_write_text(output_path, rendered, encoding="utf-8")
@@ -103,252 +129,297 @@ def export_lesson_to_pdf_file(
     markdown_content: str,
     output_path: Path,
 ) -> Path:
-    """Export a lesson to PDF using WeasyPrint, wkhtmltopdf, or built-in pure-Python renderer.
+    """Export a lesson to a PDF that displays Cyrillic without viewer fonts.
 
-    WeasyPrint and wkhtmltopdf are preferred when available. When neither is installed,
-    a pure-Python compliant PDF generator produces a clean, readable PDF with full
-    Unicode/Cyrillic support and table of contents.
+    WeasyPrint and wkhtmltopdf remain preferred when installed.  The bundled
+    fallback rasterizes each page with a verified Cyrillic-capable system font
+    and embeds the page pixels in the PDF.  Unlike the previous Identity-H /
+    Helvetica construction, the resulting document does not rely on font
+    substitution by the PDF viewer.
     """
+
     rendered = render_lesson_html(title, markdown_content)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
         from weasyprint import HTML  # type: ignore[import-not-found]
 
-        HTML(string=rendered, base_url=str(output_path.parent)).write_pdf(str(output_path))
-        return output_path
+        temporary_pdf = output_path.with_name(f".{output_path.name}.weasy.tmp")
+        try:
+            HTML(string=rendered, base_url=str(output_path.parent)).write_pdf(str(temporary_pdf))
+            if temporary_pdf.is_file() and temporary_pdf.stat().st_size > 0:
+                os.replace(temporary_pdf, output_path)
+                return output_path
+        finally:
+            temporary_pdf.unlink(missing_ok=True)
     except ImportError:
         pass
     except Exception:
+        # Fall through to the next local renderer. User material remains intact.
         pass
 
     converter = shutil.which("wkhtmltopdf")
     if converter:
-        temporary_html = output_path.with_suffix(".html.tmp")
+        temporary_html = output_path.with_name(f".{output_path.name}.html.tmp")
+        temporary_pdf = output_path.with_name(f".{output_path.name}.wkhtml.tmp")
         try:
             atomic_write_text(temporary_html, rendered, encoding="utf-8")
             result = subprocess.run(
-                [converter, "--quiet", str(temporary_html), str(output_path)],
+                [converter, "--quiet", str(temporary_html), str(temporary_pdf)],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=120,
             )
-            if result.returncode == 0 and output_path.is_file():
+            if result.returncode == 0 and temporary_pdf.is_file() and temporary_pdf.stat().st_size:
+                os.replace(temporary_pdf, output_path)
                 return output_path
         except (AtomicIOError, OSError, subprocess.TimeoutExpired):
             pass
         finally:
             temporary_html.unlink(missing_ok=True)
+            temporary_pdf.unlink(missing_ok=True)
 
-    # Pure-Python PDF generation fallback
     try:
-        pdf_data = _render_pure_python_pdf(title, markdown_content)
-        output_path.write_bytes(pdf_data)
-        return output_path
+        _atomic_write_bytes(output_path, _render_pure_python_pdf(title, markdown_content))
     except Exception as exc:
         raise RuntimeError(f"Не удалось экспортировать конспект в PDF: {exc}") from exc
+    return output_path
 
 
 def _render_pure_python_pdf(title: str, markdown_content: str) -> bytes:
-    import textwrap
+    """Render a multi-page image PDF with visible Unicode/Cyrillic text."""
 
-    clean_title = sanitize_markdown_text(title.strip())
+    pages = _render_pdf_page_images(title, markdown_content)
+    buffer = io.BytesIO()
+    first, *remaining = pages
+    first.save(
+        buffer,
+        format="PDF",
+        save_all=True,
+        append_images=remaining,
+        resolution=144.0,
+        quality=95,
+    )
+    payload = buffer.getvalue()
+    if not payload.startswith(b"%PDF-") or not payload.rstrip().endswith(b"%%EOF"):
+        raise RuntimeError("Встроенный PDF-рендерер вернул повреждённый документ.")
+    return payload
+
+
+def _render_pdf_page_images(title: str, markdown_content: str) -> list[Any]:
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as exc:
+        raise RuntimeError(
+            "Для автономного PDF требуется Pillow, входящий в официальный пакет Konspekt."
+        ) from exc
+
+    clean_title = html.unescape(sanitize_markdown_text(title.strip())) or "Конспект"
+    fonts = {
+        "title": _load_pdf_font(48, bold=True),
+        "h1": _load_pdf_font(38, bold=True),
+        "h2": _load_pdf_font(32, bold=True),
+        "h3": _load_pdf_font(28, bold=True),
+        "body": _load_pdf_font(24),
+        "small": _load_pdf_font(19),
+    }
+
+    page_width, page_height = 1240, 1754  # A4 at approximately 150 DPI.
+    margin_x, margin_top, margin_bottom = 92, 96, 92
+    text_width = page_width - 2 * margin_x
+    ink = (23, 33, 36)
+    muted = (78, 92, 96)
+    accent = (23, 107, 69)
+    paper = (255, 255, 255)
+
+    pages: list[Any] = []
+    image: Any
+    draw: Any
+    cursor_y: int
+
+    def new_page(*, continuation: bool = False) -> None:
+        nonlocal image, draw, cursor_y
+        image = Image.new("RGB", (page_width, page_height), paper)
+        draw = ImageDraw.Draw(image)
+        cursor_y = margin_top
+        if continuation:
+            header = clean_title[:80]
+            draw.text((margin_x, 48), header, font=fonts["small"], fill=muted)
+            draw.line((margin_x, 78, page_width - margin_x, 78), fill=(220, 226, 223), width=2)
+            cursor_y = 102
+        pages.append(image)
+
+    new_page()
+
+    def draw_block(text: str, kind: str, *, indent: int = 0) -> None:
+        nonlocal cursor_y
+        font = fonts[kind]
+        fill = accent if kind in {"title", "h1", "h2"} else ink
+        line_height = _font_line_height(font) + (10 if kind in {"title", "h1"} else 7)
+        available_width = max(120, text_width - indent)
+        lines = _wrap_for_width(draw, text, font, available_width)
+        block_height = max(line_height, len(lines) * line_height) + 12
+        if cursor_y + block_height > page_height - margin_bottom:
+            new_page(continuation=True)
+        for line in lines:
+            draw.text((margin_x + indent, cursor_y), line, font=font, fill=fill)
+            cursor_y += line_height
+        cursor_y += 12
+
+    draw_block(clean_title, "title")
+
     toc = extract_table_of_contents(markdown_content)
-
-    items: list[tuple[str, str]] = [("title", clean_title)]
     if toc:
-        items.append(("h2", "Оглавление"))
+        draw_block("Оглавление", "h2")
         for entry in toc:
-            prefix = "  " * (entry.level - 1) + "• "
-            items.append(("toc_item", f"{prefix}{entry.title}"))
+            indent = max(0, min(3, entry.level - 1)) * 28
+            draw_block(f"• {entry.title}", "small", indent=indent)
+        cursor_y += 18
 
-    for line in markdown_content.splitlines():
-        line = line.strip()
+    for raw_line in markdown_content.splitlines():
+        line = html.unescape(sanitize_markdown_text(raw_line.strip()))
         if not line:
+            cursor_y += 10
             continue
         if line.startswith("#"):
-            level = min(6, line.count("#", 0, line.find(" "))) if " " in line else line.count("#")
-            text = line.lstrip("#").strip()
-            items.append((f"h{min(level, 3)}", text))
-        elif line.startswith("- ") or line.startswith("* "):
-            items.append(("bullet", line[2:].strip()))
+            prefix, separator, heading = line.partition(" ")
+            if separator and set(prefix) == {"#"}:
+                level = len(prefix)
+                draw_block(heading.strip(), "h1" if level == 1 else "h2" if level == 2 else "h3")
+                continue
+        if line.startswith(("- ", "* ")):
+            draw_block(f"• {line[2:].strip()}", "body", indent=24)
         else:
-            items.append(("p", line))
+            draw_block(line, "body")
 
-    page_width = 595
-    page_height = 842
-    margin_x = 54
-    margin_top = 54
-    margin_bottom = 54
+    total_pages = len(pages)
+    for index, page in enumerate(pages, start=1):
+        page_draw = ImageDraw.Draw(page)
+        footer = f"Страница {index} из {total_pages}"
+        footer_width = page_draw.textlength(footer, font=fonts["small"])
+        page_draw.text(
+            ((page_width - footer_width) / 2, page_height - 58),
+            footer,
+            font=fonts["small"],
+            fill=muted,
+        )
+    return pages
 
-    pages_ops: list[list[str]] = []
-    current_page_ops: list[str] = []
-    cursor_y = page_height - margin_top
 
-    def start_new_page() -> None:
-        nonlocal current_page_ops, cursor_y
-        if current_page_ops:
-            pages_ops.append(current_page_ops)
-        current_page_ops = []
-        cursor_y = page_height - margin_top
+def _load_pdf_font(size: int, *, bold: bool = False) -> Any:
+    try:
+        from PIL import ImageFont
+    except ImportError as exc:
+        raise RuntimeError("Pillow недоступен для PDF-экспорта.") from exc
 
-    for kind, text in items:
-        if kind == "title":
-            font_size = 18
-            line_height = 24
-            max_chars = 45
-            color = "0.09 0.42 0.27"
-        elif kind == "h1":
-            font_size = 14
-            line_height = 20
-            max_chars = 55
-            color = "0.09 0.42 0.27"
-            cursor_y -= 8
-        elif kind == "h2":
-            font_size = 12
-            line_height = 18
-            max_chars = 65
-            color = "0.09 0.42 0.27"
-            cursor_y -= 6
-        elif kind == "h3":
-            font_size = 11
-            line_height = 16
-            max_chars = 70
-            color = "0.09 0.13 0.11"
-            cursor_y -= 4
-        elif kind == "bullet":
-            font_size = 10
-            line_height = 14
-            max_chars = 72
-            color = "0.09 0.13 0.11"
-            text = "  •  " + text
-        elif kind == "toc_item":
-            font_size = 9
-            line_height = 13
-            max_chars = 75
-            color = "0.2 0.25 0.22"
+    for candidate in _pdf_font_candidates(bold=bold):
+        try:
+            font = ImageFont.truetype(str(candidate), size=size)
+        except (OSError, ValueError):
+            continue
+        if _font_supports_cyrillic(font):
+            return font
+    raise RuntimeError(
+        "Не найден системный шрифт с поддержкой кириллицы. "
+        "Установи Segoe UI, Arial, Helvetica или DejaVu Sans и повтори экспорт."
+    )
+
+
+def _pdf_font_candidates(*, bold: bool) -> tuple[Path | str, ...]:
+    configured = os.environ.get("KONSPEKT_PDF_FONT", "").strip()
+    windows = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    if bold:
+        names: tuple[Path | str, ...] = (
+            windows / "seguisb.ttf",
+            windows / "segoeuib.ttf",
+            windows / "arialbd.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "DejaVuSans-Bold.ttf",
+            "Arial Bold.ttf",
+        )
+    else:
+        names = (
+            windows / "segoeui.ttf",
+            windows / "arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "DejaVuSans.ttf",
+            "Arial.ttf",
+        )
+    return ((Path(configured).expanduser(),) if configured else ()) + names
+
+
+def _font_supports_cyrillic(font: Any) -> bool:
+    signatures: set[tuple[Any, int]] = set()
+    for character in "АБЯабя":
+        try:
+            bbox = font.getbbox(character)
+            mask = bytes(font.getmask(character))
+        except Exception:
+            return False
+        if not bbox or not mask:
+            return False
+        signatures.add((bbox, hash(mask)))
+    # Missing glyphs normally collapse to one identical tofu box.
+    return len(signatures) >= 5
+
+
+def _font_line_height(font: Any) -> int:
+    bbox = font.getbbox("AgЙ")
+    return max(1, int(bbox[3] - bbox[1]))
+
+
+def _wrap_for_width(draw: Any, text: str, font: Any, max_width: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if draw.textlength(candidate, font=font) <= max_width:
+            current = candidate
+            continue
+        lines.extend(_split_long_line(draw, current, font, max_width))
+        current = word
+    lines.extend(_split_long_line(draw, current, font, max_width))
+    return lines
+
+
+def _split_long_line(draw: Any, text: str, font: Any, max_width: int) -> list[str]:
+    if draw.textlength(text, font=font) <= max_width:
+        return [text]
+    output: list[str] = []
+    current = ""
+    for character in text:
+        candidate = current + character
+        if current and draw.textlength(candidate, font=font) > max_width:
+            output.append(current)
+            current = character
         else:
-            font_size = 10
-            line_height = 14
-            max_chars = 75
-            color = "0.09 0.13 0.11"
+            current = candidate
+    if current:
+        output.append(current)
+    return output or [text]
 
-        wrapped_lines = textwrap.wrap(text, width=max_chars) or [""]
-        for line_str in wrapped_lines:
-            if cursor_y - line_height < margin_bottom:
-                start_new_page()
-            hex_str = "".join(f"{ord(c):04X}" for c in line_str)
-            op = f"BT {color} rg /F1 {font_size} Tf 1 0 0 1 {margin_x} {cursor_y} Tm <{hex_str}> Tj ET"
-            current_page_ops.append(op)
-            cursor_y -= line_height
-        cursor_y -= 3
 
-    if current_page_ops:
-        pages_ops.append(current_page_ops)
-    if not pages_ops:
-        pages_ops = [[]]
-
-    total_pages = len(pages_ops)
-    for p_idx, p_ops in enumerate(pages_ops, start=1):
-        footer_text = f"Страница {p_idx} из {total_pages}"
-        f_hex = "".join(f"{ord(c):04X}" for c in footer_text)
-        p_ops.append(
-            f"BT 0.5 0.5 0.5 rg /F1 8 Tf 1 0 0 1 {page_width // 2 - 30} 30 Tm <{f_hex}> Tj ET"
-        )
-        if p_idx > 1:
-            h_hex = "".join(f"{ord(c):04X}" for c in clean_title[:40])
-            p_ops.append(
-                f"BT 0.5 0.5 0.5 rg /F1 8 Tf 1 0 0 1 {margin_x} {page_height - 35} Tm <{h_hex}> Tj ET"
-            )
-            p_ops.append(
-                f"0.85 0.85 0.85 RG 0.5 w {margin_x} {page_height - 40} m {page_width - margin_x} {page_height - 40} l S"
-            )
-
-    cmap_data = (
-        "/CIDInit /ProcSet findresource begin\n"
-        "12 dict begin\n"
-        "begincmap\n"
-        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
-        "/CMapName /Custom-ToUnicode def\n"
-        "/CMapType 2 def\n"
-        "1 begincodespacerange\n"
-        "<0000> <FFFF>\n"
-        "endcodespacerange\n"
-        "1 beginbfrange\n"
-        "<0000> <FFFF> <0000>\n"
-        "endbfrange\n"
-        "endcmap\n"
-        "CMapName currentdict /CMap defineresource pop\n"
-        "end\n"
-        "end\n"
-    ).encode("ascii")
-
-    objects: list[bytes] = []
-    offsets: list[int] = []
-
-    # 1: Catalog
-    # 2: Pages
-    # 3: Font
-    # 4: CIDFont
-    # 5: ToUnicode CMap
-    # 6: FontDescriptor
-    page_obj_ids = [7 + 2 * i for i in range(total_pages)]
-    content_obj_ids = [8 + 2 * i for i in range(total_pages)]
-
-    # Obj 1: Catalog
-    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
-    # Obj 2: Pages
-    kids_str = " ".join(f"{pid} 0 R" for pid in page_obj_ids)
-    objects.append(f"<< /Type /Pages /Count {total_pages} /Kids [{kids_str}] >>".encode("ascii"))
-    # Obj 3: Type0 Font
-    objects.append(
-        b"<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica /Encoding /Identity-H /DescendantFonts [4 0 R] /ToUnicode 5 0 R >>"
-    )
-    # Obj 4: CIDFontType2
-    objects.append(
-        b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /DW 600 >>"
-    )
-    # Obj 5: ToUnicode Stream
-    objects.append(
-        f"<< /Length {len(cmap_data)} >>\nstream\n".encode("ascii") + cmap_data + b"\nendstream"
-    )
-    # Obj 6: FontDescriptor
-    objects.append(
-        b"<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 /FontBBox [-200 -200 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>"
-    )
-
-    # Pages and contents
-    for i in range(total_pages):
-        # Page object
-        cid = content_obj_ids[i]
-        objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Resources << /Font << /F1 3 0 R >> >> /Contents {cid} 0 R >>".encode(
-                "ascii"
-            )
-        )
-        # Content object
-        content_stream = "\n".join(pages_ops[i]).encode("ascii")
-        objects.append(
-            f"<< /Length {len(content_stream)} >>\nstream\n".encode("ascii")
-            + content_stream
-            + b"\nendstream"
-        )
-
-    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    for idx, obj in enumerate(objects, start=1):
-        offsets.append(len(out))
-        out.extend(f"{idx} 0 obj\n".encode("ascii"))
-        out.extend(obj)
-        out.extend(b"\nendobj\n")
-
-    xref_offset = len(out)
-    out.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii"))
-    for off in offsets:
-        out.extend(f"{off:010d} 00000 n \n".encode("ascii"))
-
-    out.extend(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode(
-            "ascii"
-        )
-    )
-    return bytes(out)
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.pdf.tmp")
+    try:
+        with temporary.open("wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            try:
+                os.fsync(stream.fileno())
+            except OSError:
+                pass
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
