@@ -140,9 +140,7 @@ def load_library_with_quarantine(
         except BBBImportError:
             pass
 
-    sorted_recordings = sorted(
-        valid_recordings, key=lambda item: item.imported_at, reverse=True
-    )
+    sorted_recordings = sorted(valid_recordings, key=lambda item: item.imported_at, reverse=True)
     return sorted_recordings, quarantine_path
 
 
@@ -195,9 +193,7 @@ def filter_and_sort_recordings(
         result = [
             recording
             for recording in result
-            if resolve_lecture_state(
-                default_lecture_directory(recording, base_dir=base_dir)
-            )
+            if resolve_lecture_state(default_lecture_directory(recording, base_dir=base_dir))
             == state_filter
         ]
 

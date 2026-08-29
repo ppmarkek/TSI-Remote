@@ -86,7 +86,7 @@ def terminate_process_tree(
     """Terminate a process and every descendant on Windows, macOS, and Linux.
 
     Existing call sites do not create dedicated process groups, so this helper
-    discovers descendants explicitly.  Windows delegates to ``taskkill /T``;
+    discovers descendants explicitly. Windows delegates to ``taskkill /T``;
     POSIX systems snapshot the parent/child table with ``ps`` and signal the
     deepest descendants before the root process.
     """
@@ -99,9 +99,7 @@ def terminate_process_tree(
         _terminate_posix_tree(process, grace_period_seconds)
 
 
-def _terminate_windows_tree(
-    process: subprocess.Popen[Any], grace_period_seconds: float
-) -> None:
+def _terminate_windows_tree(process: subprocess.Popen[Any], grace_period_seconds: float) -> None:
     pid = process.pid
     try:
         subprocess.run(
@@ -136,9 +134,7 @@ def _terminate_windows_tree(
     _wait_for_root_exit(process, max(0.2, grace_period_seconds))
 
 
-def _terminate_posix_tree(
-    process: subprocess.Popen[Any], grace_period_seconds: float
-) -> None:
+def _terminate_posix_tree(process: subprocess.Popen[Any], grace_period_seconds: float) -> None:
     descendants = _posix_descendant_pids(process.pid)
     targets = [*descendants, process.pid]
     _signal_pids(targets, signal.SIGTERM)
