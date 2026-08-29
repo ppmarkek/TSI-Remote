@@ -14,9 +14,9 @@ class PlatformAppPaths:
     """Manage application paths across Windows, macOS, and Linux.
 
     ``system_override`` is a genuine target-platform override rather than a
-    cosmetic flag.  This makes cross-platform tests deterministic even when a
-    macOS path is evaluated on Windows or Linux, and avoids consulting
-    ``platformdirs`` for the host operating system by mistake.
+    cosmetic flag. This makes cross-platform tests deterministic even when a
+    macOS path is evaluated on Windows or Linux, and avoids consulting host-OS
+    path rules by mistake.
     """
 
     app_name: str = "Konspekt"
@@ -40,6 +40,14 @@ class PlatformAppPaths:
         configured = os.environ.get("KONSPEKT_DATA_DIR", "").strip()
         if configured:
             return Path(configured).expanduser()
+
+        # LOCALAPPDATA is also an explicit isolation hook used by legacy tests
+        # and migrations. Honor it when no target platform was forced, but do
+        # not let the host environment override an explicit Darwin/Linux test.
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_appdata and (self.system_override is None or self._system == "win32"):
+            return Path(local_appdata).expanduser() / self.app_name
+
         if self._system == "darwin":
             return Path.home() / "Library" / "Application Support" / self.app_name
         if self._system == "win32":
