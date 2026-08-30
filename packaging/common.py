@@ -35,8 +35,14 @@ def collect_shared_packaging_info(
     ]
 
     assets_dir = project_root / "assets"
-    if (assets_dir / "konspekt.png").is_file():
-        datas.append((str(assets_dir / "konspekt.png"), "assets"))
+    for asset_name in (
+        "konspekt.png",
+        "konspekt-macos.png",
+        "konspekt-sidebar.png",
+    ):
+        asset = assets_dir / asset_name
+        if asset.is_file():
+            datas.append((str(asset), "assets"))
 
     tesseract_executable = shutil.which("tesseract")
     if not tesseract_executable:

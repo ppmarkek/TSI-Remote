@@ -117,6 +117,23 @@ def _operation_is_current(app: object, operation_id: int | None) -> bool:
     )
 
 
+def _scrollbar_should_be_visible(first: str | float, last: str | float) -> bool:
+    """Return whether a canvas viewport leaves any content clipped."""
+
+    return float(first) > 0.0 or float(last) < 1.0
+
+
+class AutoHideScrollbar(ttk.Scrollbar):
+    """Grid scrollbar that gets out of the way when all content fits."""
+
+    def set(self, first: str | float, last: str | float) -> None:
+        if _scrollbar_should_be_visible(first, last):
+            self.grid()
+        else:
+            self.grid_remove()
+        super().set(first, last)
+
+
 def _deliver_processing_progress(
     app: object,
     operation_id: int | None,
@@ -177,6 +194,7 @@ class StudyApp(tk.Tk):
         if sys.platform == "win32":
             try:
                 import ctypes
+
                 ctypes.windll.shcore.SetProcessDpiAwareness(1)
             except Exception:
                 pass
@@ -293,7 +311,8 @@ class StudyApp(tk.Tk):
     @staticmethod
     def _load_app_icon() -> tk.PhotoImage | None:
         try:
-            return tk.PhotoImage(file=asset_path("konspekt.png"))
+            icon_name = "konspekt-macos.png" if sys.platform == "darwin" else "konspekt.png"
+            return tk.PhotoImage(file=asset_path(icon_name))
         except tk.TclError:
             return None
 
@@ -351,11 +370,76 @@ class StudyApp(tk.Tk):
     def _configure_styles(self) -> None:
         self.style.theme_use("clam")
         self.style.configure("TFrame", background=PALETTE["canvas"])
-        # Windows: widen scrollbars to match native feel and suppress
-        # the dotted focus rectangle that looks out of place.
         if sys.platform == "win32":
+            # Widen scrollbars to match the Windows pointer target.
             self.style.configure("Vertical.TScrollbar", width=14)
             self.style.configure("Horizontal.TScrollbar", width=14)
+        elif sys.platform == "darwin":
+            # The clam defaults expose old-fashioned arrow buttons on macOS.
+            # Keep the colourable theme, but reduce the scrollbar to a quiet
+            # track and thumb so it fits the rest of the interface.
+            self.style.layout(
+                "Vertical.TScrollbar",
+                [
+                    (
+                        "Vertical.Scrollbar.trough",
+                        {
+                            "sticky": "ns",
+                            "children": [
+                                (
+                                    "Vertical.Scrollbar.thumb",
+                                    {"expand": "1", "sticky": "nswe"},
+                                )
+                            ],
+                        },
+                    )
+                ],
+            )
+            self.style.layout(
+                "Horizontal.TScrollbar",
+                [
+                    (
+                        "Horizontal.Scrollbar.trough",
+                        {
+                            "sticky": "ew",
+                            "children": [
+                                (
+                                    "Horizontal.Scrollbar.thumb",
+                                    {"expand": "1", "sticky": "nswe"},
+                                )
+                            ],
+                        },
+                    )
+                ],
+            )
+            for scrollbar_style in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+                self.style.configure(
+                    scrollbar_style,
+                    width=10,
+                    gripcount=0,
+                    background=PALETTE["line"],
+                    troughcolor=PALETTE["canvas"],
+                    bordercolor=PALETTE["canvas"],
+                    lightcolor=PALETTE["line"],
+                    darkcolor=PALETTE["line"],
+                    relief="flat",
+                    borderwidth=0,
+                )
+                self.style.map(
+                    scrollbar_style,
+                    background=[
+                        ("pressed", PALETTE["muted"]),
+                        ("active", PALETTE["faint"]),
+                    ],
+                    lightcolor=[
+                        ("pressed", PALETTE["muted"]),
+                        ("active", PALETTE["faint"]),
+                    ],
+                    darkcolor=[
+                        ("pressed", PALETTE["muted"]),
+                        ("active", PALETTE["faint"]),
+                    ],
+                )
 
         self.style.configure(
             "Primary.TButton",
@@ -528,9 +612,47 @@ class StudyApp(tk.Tk):
         self.style.configure(
             "Settings.TCombobox",
             fieldbackground=PALETTE["surface"],
+            background=PALETTE["surface"],
             foreground=PALETTE["ink"],
-            padding=(8, 6),
+            arrowcolor=PALETTE["faint"],
+            bordercolor=PALETTE["line"],
+            lightcolor=PALETTE["line"],
+            darkcolor=PALETTE["line"],
+            selectbackground=PALETTE["primary_soft"],
+            selectforeground=PALETTE["ink"],
+            relief="flat",
+            borderwidth=1,
+            padding=(10, 7),
             font=self.type.body,
+        )
+        self.style.map(
+            "Settings.TCombobox",
+            fieldbackground=[
+                ("disabled", PALETTE["surface_soft"]),
+                ("readonly", PALETTE["surface"]),
+            ],
+            background=[
+                ("disabled", PALETTE["surface_soft"]),
+                ("pressed", PALETTE["primary_soft"]),
+                ("active", PALETTE["surface_soft"]),
+                ("readonly", PALETTE["surface"]),
+            ],
+            foreground=[
+                ("disabled", PALETTE["faint"]),
+                ("readonly", PALETTE["ink"]),
+            ],
+            arrowcolor=[
+                ("disabled", PALETTE["line"]),
+                ("active", PALETTE["primary_pressed"]),
+                ("readonly", PALETTE["faint"]),
+            ],
+            bordercolor=[
+                ("focus", PALETTE["primary"]),
+                ("active", PALETTE["faint"]),
+                ("readonly", PALETTE["line"]),
+            ],
+            lightcolor=[("focus", PALETTE["primary"])],
+            darkcolor=[("focus", PALETTE["primary"])],
         )
 
     def _build_shell(self) -> None:
@@ -708,7 +830,7 @@ class StudyApp(tk.Tk):
             takefocus=True,
         )
         settings_canvas.grid(row=0, column=0, sticky="nsew")
-        settings_scrollbar = ttk.Scrollbar(
+        settings_scrollbar = AutoHideScrollbar(
             viewport,
             orient="vertical",
             command=settings_canvas.yview,
@@ -1483,7 +1605,7 @@ class StudyApp(tk.Tk):
             takefocus=True,
         )
         canvas.grid(row=2, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(listing, orient="vertical", command=canvas.yview)
+        scrollbar = AutoHideScrollbar(listing, orient="vertical", command=canvas.yview)
         scrollbar.grid(row=2, column=1, sticky="ns", padx=(10, 0))
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -3982,10 +4104,14 @@ class StudyApp(tk.Tk):
         if sys.platform == "win32":
             try:
                 import ctypes
+
                 SPI_GETCLIENTAREAANIMATION = 0x1042
                 result = ctypes.c_bool()
                 ctypes.windll.user32.SystemParametersInfoW(
-                    SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(result), 0,
+                    SPI_GETCLIENTAREAANIMATION,
+                    0,
+                    ctypes.byref(result),
+                    0,
                 )
                 return not result.value
             except Exception:

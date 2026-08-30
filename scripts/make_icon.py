@@ -2,62 +2,65 @@
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "assets" / "konspekt-source.png"
 PNG = ROOT / "assets" / "konspekt.png"
+MAC_PNG = ROOT / "assets" / "konspekt-macos.png"
+SIDEBAR = ROOT / "assets" / "konspekt-sidebar.png"
 ICO = ROOT / "assets" / "konspekt.ico"
 ICNS = ROOT / "assets" / "konspekt.icns"
 
 CANVAS = 256
+SIDEBAR_CANVAS = 32
 MAC_CANVAS = 1024
-BACKGROUND = (255, 255, 255, 255)
-
-
-def _content_bounds(image: Image.Image) -> tuple[int, int, int, int]:
-    """Find the black/green mark while ignoring the near-white source canvas."""
-    luminance = image.convert("L")
-    foreground = luminance.point(lambda value: 255 if value < 240 else 0)
-    bounds = foreground.getbbox()
-    if bounds is None:
-        raise ValueError(f"No visible artwork found in {SOURCE}")
-    return bounds
+MAC_SAFE_AREA_RATIO = 0.80
 
 
 def _prepare_master() -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    left, top, right, bottom = _content_bounds(source)
-
-    # Retain the supplied geometry, but remove the oversized export canvas.
-    artwork = source.crop((left, top, right, bottom))
-    longest_edge = max(artwork.size)
-    padding = round(longest_edge * 0.16)
-    square_edge = longest_edge + 2 * padding
-    master = Image.new("RGBA", (square_edge, square_edge), BACKGROUND)
-    position = (
-        (square_edge - artwork.width) // 2,
-        (square_edge - artwork.height) // 2,
+    plate_mask = Image.new("L", source.size, 0)
+    plate_mask_draw = ImageDraw.Draw(plate_mask)
+    plate_mask_draw.rounded_rectangle(
+        (0, 0, source.width - 1, source.height - 1),
+        radius=round(min(source.size) * 0.25),
+        fill=255,
     )
-    master.alpha_composite(artwork, position)
-    return master
+    source.putalpha(plate_mask)
+    return source
 
 
 def render_icon(output_size: int) -> Image.Image:
     return _prepare_master().resize((output_size, output_size), Image.Resampling.LANCZOS)
 
 
+def render_macos_icon(output_size: int) -> Image.Image:
+    """Place the icon inside Apple's visual safe area for a balanced Dock size."""
+
+    plate_size = round(output_size * MAC_SAFE_AREA_RATIO)
+    plate = render_icon(plate_size)
+    canvas = Image.new("RGBA", (output_size, output_size), (0, 0, 0, 0))
+    offset = ((output_size - plate_size) // 2, (output_size - plate_size) // 2)
+    canvas.alpha_composite(plate, offset)
+    return canvas
+
+
 def main() -> None:
     runtime_icon = render_icon(CANVAS)
-    mac_icon = render_icon(MAC_CANVAS)
+    sidebar_icon = render_icon(SIDEBAR_CANVAS)
+    mac_runtime_icon = render_macos_icon(CANVAS)
+    mac_icon = render_macos_icon(MAC_CANVAS)
     runtime_icon.save(PNG, format="PNG")
+    mac_runtime_icon.save(MAC_PNG, format="PNG")
+    sidebar_icon.save(SIDEBAR, format="PNG")
     runtime_icon.save(
         ICO,
         format="ICO",
         sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)],
     )
     mac_icon.save(ICNS, format="ICNS")
-    print(f"Wrote {PNG}, {ICO}, and {ICNS} from {SOURCE}")
+    print(f"Wrote {PNG}, {MAC_PNG}, {SIDEBAR}, {ICO}, and {ICNS} from {SOURCE}")
 
 
 if __name__ == "__main__":
