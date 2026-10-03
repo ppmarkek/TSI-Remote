@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "imageio-ffmpeg>=0.5.0",
     "keyring>=24.0.0",
+    "pillow>=10.0.0",
     "platformdirs>=4.0.0",
     "pywebview>=6.2.1,<7",
     "requests>=2.24.0",
@@ -20,7 +21,6 @@ dependencies = [
 [project.optional-dependencies]
 local-ai = ["faster-whisper>=1.1.0"]
 dev = [
-    "pillow>=10.0.0",
     "pyinstaller>=6.0.0",
     "ruff>=0.5.0",
 ]

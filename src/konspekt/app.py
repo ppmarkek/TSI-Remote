@@ -82,28 +82,30 @@ from .settings import (
     load_settings,
     save_settings,
 )
+from .ui_surfaces import SurfaceButton, SurfaceCombobox, SurfaceEntry
 
 PALETTE = {
-    "canvas": "#F6F7FB",
-    "sidebar": "#0F172A",
+    "canvas": "#F7F8FA",
+    "sidebar": "#FFFFFF",
     "surface": "#FFFFFF",
-    "surface_soft": "#EEF2F7",
-    "ink": "#111827",
-    "muted": "#475569",
-    "faint": "#64748B",
-    "line": "#D7DDE7",
-    "primary": "#2F5BFF",
-    "primary_hover": "#2448CC",
-    "primary_pressed": "#1D3AA3",
-    "primary_soft": "#E8EDFF",
+    "surface_soft": "#F0F2F5",
+    "ink": "#24272D",
+    "muted": "#5B616D",
+    "faint": "#686F7A",
+    "line": "#E2E5EA",
+    "primary": "#303640",
+    "primary_hover": "#424A57",
+    "primary_pressed": "#222730",
+    "primary_soft": "#E9EDF2",
     "focus": "#B45309",
-    "success": "#167052",
+    "success": "#23654E",
+    "success_soft": "#EAF4EE",
     "danger": "#B4233C",
-    "sidebar_ink": "#F8FAFC",
-    "sidebar_muted": "#A7B2C3",
-    "sidebar_active": "#25324A",
-    "sidebar_hover": "#1E293B",
-    "sidebar_line": "#263248",
+    "sidebar_ink": "#343A45",
+    "sidebar_muted": "#686F7A",
+    "sidebar_active": "#E9EDF2",
+    "sidebar_hover": "#F0F2F5",
+    "sidebar_line": "#E2E5EA",
 }
 
 
@@ -199,7 +201,7 @@ class StudyApp(tk.Tk):
             except Exception:
                 pass
         super().__init__()
-        self.title("Конспект — учебные материалы")
+        self.title("Конспект")
         self.geometry("1240x780")
         self.minsize(960, 660)
         self.configure(background=PALETTE["canvas"])
@@ -217,6 +219,16 @@ class StudyApp(tk.Tk):
             self.iconphoto(True, self._app_icon)
         self.style = ttk.Style(self)
         self._configure_styles()
+        from .ui_surfaces import install_control_surfaces
+
+        self._control_images = install_control_surfaces(self, self.style, PALETTE)
+        self.option_add("*TEntry.font", self.type.body)
+        self.option_add("*TCombobox.font", self.type.body)
+        self.option_add("*TCombobox*Listbox.font", self.type.body)
+        self.option_add("*TCombobox*Listbox.background", PALETTE["surface"])
+        self.option_add("*TCombobox*Listbox.foreground", PALETTE["ink"])
+        self.option_add("*TCombobox*Listbox.selectBackground", PALETTE["primary_soft"])
+        self.option_add("*TCombobox*Listbox.selectForeground", PALETTE["ink"])
         self._current_screen: ttk.Frame | None = None
         from .platform_services import MigrationStatus, PlatformAppPaths, migrate_legacy_data
 
@@ -302,6 +314,22 @@ class StudyApp(tk.Tk):
         self._build_shell()
         self.show_library(animated=False)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind_all("<Map>", self._style_mapped_window, add="+")
+        self.after_idle(self._style_window_frame)
+
+    def _style_window_frame(self) -> None:
+        from .window_chrome import style_native_window
+
+        style_native_window(self, PALETTE)
+
+    def _style_mapped_window(self, event: tk.Event) -> None:
+        if isinstance(event.widget, (tk.Tk, tk.Toplevel)):
+            from .window_chrome import style_native_window
+
+            window = event.widget
+            self.after_idle(
+                lambda: style_native_window(window, PALETTE) if window.winfo_exists() else None
+            )
 
     def _on_close(self) -> None:
         """Cancel active work and wait briefly before closing the Tk shell."""
@@ -352,29 +380,21 @@ class StudyApp(tk.Tk):
             family = "Arial"
         else:
             family = "TkDefaultFont"
-        # Windows Segoe UI renders about 1pt visually larger than macOS
-        # Helvetica Neue at the same nominal size.  Subtract 1pt on Windows
-        # so that both platforms look proportionally identical.
-        d = -1 if sys.platform == "win32" else 0
         return Typography(
             family=family,
-            title=(family, 24 + d, "bold"),
-            heading=(family, 15 + d, "bold"),
-            subheading=(family, 11 + d, "bold"),
-            body=(family, 11 + d),
-            body_bold=(family, 11 + d, "bold"),
-            secondary=(family, 10 + d),
-            small=(family, 10 + d),
+            title=(family, 28, "bold"),
+            heading=(family, 17, "bold"),
+            subheading=(family, 12, "bold"),
+            body=(family, 11),
+            body_bold=(family, 11, "bold"),
+            secondary=(family, 10),
+            small=(family, 10),
         )
 
     def _configure_styles(self) -> None:
         self.style.theme_use("clam")
         self.style.configure("TFrame", background=PALETTE["canvas"])
-        if sys.platform == "win32":
-            # Widen scrollbars to match the Windows pointer target.
-            self.style.configure("Vertical.TScrollbar", width=14)
-            self.style.configure("Horizontal.TScrollbar", width=14)
-        elif sys.platform == "darwin":
+        if sys.platform in {"win32", "darwin"}:
             # The clam defaults expose old-fashioned arrow buttons on macOS.
             # Keep the colourable theme, but reduce the scrollbar to a quiet
             # track and thumb so it fits the rest of the interface.
@@ -448,16 +468,16 @@ class StudyApp(tk.Tk):
             borderwidth=0,
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            padding=(17, 10),
+            padding=(12, 4),
         )
         self.style.map(
             "Primary.TButton",
             background=[
-                ("disabled", "#C7D0E4"),
+                ("disabled", PALETTE["surface_soft"]),
                 ("pressed", PALETTE["primary_pressed"]),
                 ("active", PALETTE["primary_hover"]),
             ],
-            foreground=[("disabled", "#66728A")],
+            foreground=[("disabled", PALETTE["faint"])],
         )
 
         self.style.configure(
@@ -469,7 +489,7 @@ class StudyApp(tk.Tk):
             bordercolor=PALETTE["line"],
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
-            padding=(14, 8),
+            padding=(12, 4),
         )
         self.style.map(
             "Secondary.TButton",
@@ -484,11 +504,11 @@ class StudyApp(tk.Tk):
         self.style.configure(
             "Link.TButton",
             background=PALETTE["surface"],
-            foreground=PALETTE["primary_pressed"],
+            foreground=PALETTE["muted"],
             borderwidth=0,
             focuscolor=PALETTE["focus"],
             font=self.type.small,
-            padding=(7, 5),
+            padding=(5, 2),
         )
         self.style.map(
             "Link.TButton",
@@ -502,7 +522,7 @@ class StudyApp(tk.Tk):
             borderwidth=0,
             focuscolor=PALETTE["focus"],
             font=self.type.small,
-            padding=(7, 5),
+            padding=(5, 2),
         )
         self.style.map(
             "DangerLink.TButton",
@@ -515,9 +535,10 @@ class StudyApp(tk.Tk):
             background=PALETTE["sidebar"],
             foreground=PALETTE["sidebar_ink"],
             borderwidth=0,
+            focuscolor=PALETTE["focus"],
             font=self.type.body,
             anchor="center",
-            padding=(10, 6),
+            padding=(12, 2),
         )
         self.style.map(
             "Nav.TButton",
@@ -525,7 +546,11 @@ class StudyApp(tk.Tk):
                 ("selected", PALETTE["sidebar_active"]),
                 ("active", PALETTE["sidebar_hover"]),
             ],
-            foreground=[("active", "#FFFFFF"), ("disabled", PALETTE["sidebar_muted"])],
+            foreground=[
+                ("selected", PALETTE["ink"]),
+                ("active", PALETTE["ink"]),
+                ("disabled", PALETTE["sidebar_muted"]),
+            ],
         )
 
         self.style.configure(
@@ -536,12 +561,12 @@ class StudyApp(tk.Tk):
             focuscolor=PALETTE["focus"],
             font=self.type.body_bold,
             anchor="center",
-            padding=(12, 6),
+            padding=(14, 3),
         )
         self.style.map(
             "SidebarPrimary.TButton",
             background=[
-                ("disabled", "#334155"),
+                ("disabled", PALETTE["surface_soft"]),
                 ("pressed", PALETTE["primary_pressed"]),
                 ("active", PALETTE["primary_hover"]),
             ],
@@ -556,7 +581,7 @@ class StudyApp(tk.Tk):
             lightcolor=PALETTE["line"],
             darkcolor=PALETTE["line"],
             insertcolor=PALETTE["ink"],
-            padding=(10, 8),
+            padding=(6, 4),
             font=self.type.body,
         )
         self.style.map(
@@ -622,7 +647,7 @@ class StudyApp(tk.Tk):
             selectforeground=PALETTE["ink"],
             relief="flat",
             borderwidth=1,
-            padding=(10, 7),
+            padding=(6, 3),
             font=self.type.body,
         )
         self.style.map(
@@ -662,15 +687,13 @@ class StudyApp(tk.Tk):
         topbar = tk.Frame(
             self,
             background=PALETTE["sidebar"],
-            highlightbackground=PALETTE["sidebar_line"],
-            highlightthickness=1,
-            height=48,
+            height=64,
         )
         topbar.grid(row=0, column=0, sticky="ew")
-        topbar.grid_propagate(False)
+        topbar.pack_propagate(False)
 
         brand = tk.Frame(topbar, background=PALETTE["sidebar"])
-        brand.pack(side="left", padx=(16, 14), pady=8)
+        brand.pack(side="left", padx=(28, 28), pady=14)
         if self._sidebar_icon is not None:
             tk.Label(
                 brand,
@@ -690,50 +713,35 @@ class StudyApp(tk.Tk):
         tk.Label(
             brand,
             text="Конспект",
-            font=(self.type.family, 12, "bold"),
+            font=(self.type.family, 13, "bold"),
             foreground=PALETTE["sidebar_ink"],
             background=PALETTE["sidebar"],
         ).pack(side="left", padx=(7, 0))
 
-        tk.Frame(
-            topbar,
-            background=PALETTE["sidebar_line"],
-            width=1,
-            height=20,
-        ).pack(side="left", pady=14)
-
-        lectures_button = ttk.Button(
+        lectures_button = SurfaceButton(
             topbar,
             text="Библиотека",
             style="Nav.TButton",
             command=self.show_library,
         )
-        lectures_button.pack(side="left", padx=(12, 3), pady=8)
-        settings_button = ttk.Button(
+        lectures_button.pack(side="left", padx=(0, 4), pady=10)
+        settings_button = SurfaceButton(
             topbar,
             text="Настройки",
             style="Nav.TButton",
             command=self.show_settings,
         )
-        settings_button.pack(side="left", padx=3, pady=8)
+        settings_button.pack(side="left", padx=4, pady=10)
+        self._nav_buttons = {"library": lectures_button, "settings": settings_button}
 
-        new_lecture_btn = ttk.Button(
+        new_lecture_btn = SurfaceButton(
             topbar,
-            text="Новая лекция",
+            text="Добавить лекцию",
             style="SidebarPrimary.TButton",
             command=self.show_new_lecture,
         )
-        new_lecture_btn.pack(side="right", padx=(6, 16), pady=8)
-        system_button = ttk.Button(
-            topbar,
-            text="Проверить систему",
-            style="Nav.TButton",
-            command=self.show_system_check_dialog,
-        )
-        system_button.pack(side="right", padx=3, pady=8)
-        self._navigation_buttons.extend(
-            (new_lecture_btn, lectures_button, settings_button, system_button)
-        )
+        new_lecture_btn.pack(side="right", padx=(8, 28), pady=10)
+        self._navigation_buttons.extend((new_lecture_btn, lectures_button, settings_button))
 
         workspace = tk.Frame(self, background=PALETTE["canvas"])
         workspace.grid(row=1, column=0, sticky="nsew")
@@ -746,6 +754,10 @@ class StudyApp(tk.Tk):
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(0, weight=1)
         self.content = content
+
+    def _mark_navigation(self, active: str) -> None:
+        for key, button in self._nav_buttons.items():
+            button.state(["selected"] if key == active else ["!selected"])
 
     def _set_navigation_enabled(self, enabled: bool) -> None:
         for button in self._navigation_buttons:
@@ -784,8 +796,9 @@ class StudyApp(tk.Tk):
             pending.extend(widget.winfo_children())
 
     def show_settings(self) -> None:
+        self._mark_navigation("settings")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(36, 28, 36, 36))
+        screen.configure(padding=(40, 32, 40, 36))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
@@ -800,7 +813,7 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(
+        SurfaceButton(
             header_row,
             text="Проверить систему",
             style="Secondary.TButton",
@@ -922,7 +935,7 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
         ).grid(row=3, column=0, sticky="w", padx=(0, 24), pady=8)
-        api_key_entry = ttk.Entry(
+        api_key_entry = SurfaceEntry(
             form,
             textvariable=self._settings_api_key,
             show="•",
@@ -937,7 +950,7 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
         ).grid(row=4, column=0, sticky="w", padx=(0, 24), pady=8)
-        ttk.Entry(
+        SurfaceEntry(
             form,
             textvariable=self._settings_api_model,
             style="Source.TEntry",
@@ -995,7 +1008,7 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
         ).grid(row=9, column=0, sticky="w", padx=(0, 24), pady=8)
-        self._chatgpt_model_combobox = ttk.Combobox(
+        self._chatgpt_model_combobox = SurfaceCombobox(
             form,
             textvariable=self._settings_chatgpt_model,
             values=(self.settings.chatgpt_model,),
@@ -1009,7 +1022,7 @@ class StudyApp(tk.Tk):
             lambda _: self._set_active_chatgpt_model(self._settings_chatgpt_model.get()),
         )
 
-        self._chatgpt_login_button = ttk.Button(
+        self._chatgpt_login_button = SurfaceButton(
             form,
             text="Войти через ChatGPT",
             style="Secondary.TButton",
@@ -1046,7 +1059,7 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
         ).grid(row=14, column=0, sticky="w", padx=(0, 24), pady=8)
-        ttk.Combobox(
+        SurfaceCombobox(
             form,
             textvariable=self._settings_whisper_model,
             values=("tiny", "base", "small"),
@@ -1064,7 +1077,7 @@ class StudyApp(tk.Tk):
         ).grid(row=15, column=0, sticky="w", padx=(0, 24), pady=8)
         interval = tk.Frame(form, background=PALETTE["canvas"])
         interval.grid(row=15, column=1, sticky="w", pady=8)
-        ttk.Combobox(
+        SurfaceCombobox(
             interval,
             textvariable=self._settings_frame_interval,
             values=("30", "60", "90"),
@@ -1088,7 +1101,7 @@ class StudyApp(tk.Tk):
 
         actions = tk.Frame(settings_body, background=PALETTE["canvas"])
         actions.grid(row=1, column=0, sticky="ew", pady=(24, 12))
-        ttk.Button(
+        SurfaceButton(
             actions,
             text="Сохранить настройки",
             style="Primary.TButton",
@@ -1355,8 +1368,9 @@ class StudyApp(tk.Tk):
         )
 
     def show_library(self, animated: bool = True) -> None:
+        self._mark_navigation("library")
         screen = ttk.Frame(self.content, style="TFrame")
-        screen.configure(padding=(48, 36, 48, 40))
+        screen.configure(padding=(40, 34, 40, 32))
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
@@ -1365,28 +1379,18 @@ class StudyApp(tk.Tk):
         intro.grid_columnconfigure(0, weight=1)
         tk.Label(
             intro,
-            text="Библиотека лекций",
+            text="Библиотека",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             intro,
-            text="Записи, расшифровки и готовые конспекты — в одном рабочем списке.",
+            text="Записи лекций и конспекты. Всё, что нужно для следующего занятия.",
             font=self.type.body,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Button(
-            intro,
-            text="Добавить лекцию",
-            style="Primary.TButton",
-            command=self.show_new_lecture,
-        ).grid(row=0, column=1, rowspan=2, sticky="e")
-
-        divider = tk.Frame(screen, background=PALETTE["line"], height=1)
-        divider.grid(row=1, column=0, sticky="ew", pady=(28, 0))
-
         if self.library:
             self._build_library_list(screen)
         else:
@@ -1403,8 +1407,6 @@ class StudyApp(tk.Tk):
         message = tk.Frame(
             empty,
             background=PALETTE["surface"],
-            highlightbackground=PALETTE["line"],
-            highlightthickness=1,
             padx=36,
             pady=32,
         )
@@ -1430,11 +1432,12 @@ class StudyApp(tk.Tk):
             background=PALETTE["surface"],
             wraplength=430,
         ).grid(row=1, column=0, sticky="w", pady=(8, 20), padx=(0, 40))
-        ttk.Button(
+        tk.Label(
             message,
-            text="Добавить первую лекцию",
-            style="Primary.TButton",
-            command=self.show_new_lecture,
+            text="Нажми «Добавить лекцию» в верхней панели.",
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["surface"],
         ).grid(row=2, column=0, sticky="w")
 
         steps = tk.Frame(message, background=PALETTE["surface"])
@@ -1479,25 +1482,39 @@ class StudyApp(tk.Tk):
 
     def _build_library_list(self, screen: ttk.Frame) -> None:
         listing = tk.Frame(screen, background=PALETTE["canvas"])
-        listing.grid(row=2, column=0, sticky="nsew", pady=(22, 0))
+        listing.grid(row=2, column=0, sticky="nsew", pady=(28, 0))
         listing.grid_columnconfigure(0, weight=1)
         listing.grid_rowconfigure(2, weight=1)
 
         toolbar = tk.Frame(listing, background=PALETTE["canvas"])
         toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
         toolbar.grid_columnconfigure(0, weight=1)
-        search = ttk.Entry(
-            toolbar, textvariable=self._library_query, width=34, style="Source.TEntry"
+        tk.Label(
+            toolbar,
+            text="Поиск по библиотеке",
+            font=self.type.small,
+            foreground=PALETTE["muted"],
+            background=PALETTE["canvas"],
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        search = SurfaceEntry(
+            toolbar,
+            textvariable=self._library_query,
+            width=34,
+            style="Source.TEntry",
+            font=self.type.body,
         )
-        search.grid(row=0, column=0, columnspan=3, sticky="ew")
+        search.grid(row=1, column=0, sticky="ew")
         search.configure(takefocus=True)
         search.bind("<Return>", lambda _: self.show_library(animated=False))
-        ttk.Button(
+        SurfaceButton(
             toolbar,
             text="Найти",
             style="Secondary.TButton",
             command=lambda: self.show_library(animated=False),
-        ).grid(row=0, column=3, padx=(8, 0))
+        ).grid(row=1, column=1, padx=(10, 0), sticky="ns")
+        filters = tk.Frame(toolbar, background=PALETTE["canvas"])
+        filters.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        filters.grid_columnconfigure(2, weight=1)
         state_values = (
             "Все состояния",
             "Импортировано",
@@ -1505,54 +1522,54 @@ class StudyApp(tk.Tk):
             "Пакет готов",
             "Конспект готов",
         )
-        state_combo = ttk.Combobox(
-            toolbar,
+        state_combo = SurfaceCombobox(
+            filters,
             textvariable=self._library_state_filter,
             values=state_values,
             state="readonly",
-            width=16,
+            width=18,
             style="Settings.TCombobox",
         )
-        state_combo.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        state_combo.grid(row=0, column=0, sticky="w")
         state_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
 
         date_values = ("Все даты", "Сегодня", "За 7 дней", "За 30 дней")
-        date_combo = ttk.Combobox(
-            toolbar,
+        date_combo = SurfaceCombobox(
+            filters,
             textvariable=self._library_date_filter,
             values=date_values,
             state="readonly",
             width=12,
             style="Settings.TCombobox",
         )
-        date_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+        date_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
         date_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
 
-        sort_combo = ttk.Combobox(
-            toolbar,
+        sort_combo = SurfaceCombobox(
+            filters,
             textvariable=self._library_sort,
             values=("Сначала новые", "Сначала старые", "По названию"),
             state="readonly",
             width=15,
             style="Settings.TCombobox",
         )
-        sort_combo.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
+        sort_combo.grid(row=0, column=3, sticky="e", padx=(10, 0))
         sort_combo.bind("<<ComboboxSelected>>", lambda _: self.show_library(animated=False))
 
-        ttk.Button(
-            toolbar,
+        SurfaceButton(
+            filters,
             text="Корзина",
             style="Secondary.TButton",
             command=self.show_trash_dialog,
-        ).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=(10, 0))
+        ).grid(row=0, column=4, sticky="e", padx=(10, 0))
 
         tk.Label(
-            toolbar,
+            listing,
             textvariable=self._library_storage_status,
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=0, column=4, padx=(14, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="e", pady=(14, 0))
 
         def _calc_size_worker():
             try:
@@ -1592,11 +1609,11 @@ class StudyApp(tk.Tk):
         )
         tk.Label(
             listing,
-            text=f"Показано: {len(filtered)} из {len(self.library)}",
+            text=f"Лекции: {len(filtered)} из {len(self.library)}",
             font=self.type.small,
             foreground=PALETTE["muted"],
             background=PALETTE["canvas"],
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 12))
 
         canvas = tk.Canvas(
             listing,
@@ -1612,8 +1629,6 @@ class StudyApp(tk.Tk):
         rows = tk.Frame(
             canvas,
             background=PALETTE["surface"],
-            highlightbackground=PALETTE["line"],
-            highlightthickness=1,
         )
         rows.grid_columnconfigure(0, weight=1)
         rows_window = canvas.create_window((0, 0), window=rows, anchor="nw")
@@ -1633,31 +1648,65 @@ class StudyApp(tk.Tk):
         canvas.bind("<Home>", lambda _: canvas.yview_moveto(0.0))
         canvas.bind("<End>", lambda _: canvas.yview_moveto(1.0))
 
+        if not filtered:
+            tk.Label(
+                rows,
+                text="Лекции не найдены",
+                font=self.type.heading,
+                foreground=PALETTE["ink"],
+                background=PALETTE["surface"],
+            ).grid(row=0, column=0, sticky="w", padx=24, pady=(28, 8))
+            tk.Label(
+                rows,
+                text="Измени поисковый запрос или выбери другие фильтры.",
+                font=self.type.body,
+                foreground=PALETTE["muted"],
+                background=PALETTE["surface"],
+            ).grid(row=1, column=0, sticky="w", padx=24, pady=(0, 28))
+
         for index, recording in enumerate(filtered):
             row = tk.Frame(
                 rows,
                 background=PALETTE["surface"],
-                padx=20,
-                pady=16,
+                padx=24,
+                pady=18,
             )
             row.grid(row=index * 2, column=0, sticky="ew")
-            row.grid_columnconfigure(0, weight=1)
+            row.grid_columnconfigure(1, weight=1)
+            source_name = "ФАЙЛ" if recording.source_url.startswith(("local:", "file:")) else "BBB"
             tk.Label(
                 row,
+                text=source_name,
+                font=self.type.small,
+                foreground=PALETTE["muted"],
+                background=PALETTE["surface_soft"],
+                width=5,
+                height=3,
+            ).grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 18))
+            row_info = tk.Frame(row, background=PALETTE["surface"])
+            row_info.grid(row=0, column=1, rowspan=2, sticky="new")
+            title_label = tk.Label(
+                row_info,
                 text=recording.title,
-                font=self.type.body_bold,
+                font=self.type.subheading,
                 foreground=PALETTE["ink"],
                 background=PALETTE["surface"],
-                wraplength=560,
+                wraplength=440,
                 justify="left",
-            ).grid(row=0, column=0, sticky="w")
+                anchor="w",
+            )
+            title_label.pack(anchor="w", fill="x")
+            row.bind(
+                "<Configure>",
+                lambda event, label=title_label: self._fit_library_title(label),
+            )
             tk.Label(
-                row,
-                text=self._recording_summary(recording),
+                row_info,
+                text=format_imported_at(recording.imported_at),
                 font=self.type.small,
                 foreground=PALETTE["muted"],
                 background=PALETTE["surface"],
-            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+            ).pack(anchor="w", pady=(6, 0))
 
             prepared = lecture_is_prepared(recording)
             package_ready = prepared and context_package_is_ready(recording)
@@ -1675,7 +1724,7 @@ class StudyApp(tk.Tk):
                 action = on_action_reader
                 action_state = "normal"
             elif not prepared:
-                status_text = "Материалы не подготовлены"
+                status_text = "Ожидает подготовки"
                 status_color = PALETTE["muted"]
                 action_text = "Подготовить"
                 action_style = "Primary.TButton"
@@ -1709,49 +1758,47 @@ class StudyApp(tk.Tk):
                 action_state = "normal"
 
             right_meta = tk.Frame(row, background=PALETTE["surface"])
-            right_meta.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
-            tk.Label(
-                right_meta,
-                text=format_imported_at(recording.imported_at),
-                font=self.type.small,
-                foreground=PALETTE["faint"],
-                background=PALETTE["surface"],
-            ).pack(anchor="e")
+            right_meta.grid(row=0, column=2, rowspan=2, sticky="ne", padx=(20, 0))
             tk.Label(
                 right_meta,
                 text=status_text,
                 font=self.type.small,
                 foreground=status_color,
-                background=PALETTE["surface"],
-            ).pack(anchor="e", pady=(2, 0))
+                background=PALETTE["success_soft"]
+                if status_color == PALETTE["success"]
+                else PALETTE["surface_soft"],
+                padx=10,
+                pady=4,
+            ).pack(anchor="e", pady=(0, 8))
 
-            ttk.Button(
-                row,
+            SurfaceButton(
+                right_meta,
                 text=action_text,
                 style=action_style,
                 command=action,
                 state=action_state,
-            ).grid(row=0, column=2, rowspan=2, sticky="e", padx=(16, 0))
+                width=19,
+            ).pack(anchor="e")
 
             management = tk.Frame(row, background=PALETTE["surface"])
-            management.grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
-            ttk.Button(
+            management.grid(row=2, column=1, columnspan=2, sticky="w", pady=(10, 0))
+            SurfaceButton(
                 management,
                 text="Переименовать",
                 style="Link.TButton",
                 command=lambda item=recording: self._rename_library_recording(item),
             ).pack(side="left")
-            ttk.Button(
-                management,
-                text="В корзину",
-                style="DangerLink.TButton",
-                command=lambda item=recording: self._trash_library_recording(item),
-            ).pack(side="left", padx=(6, 0))
-            ttk.Button(
+            SurfaceButton(
                 management,
                 text="Открыть папку",
                 style="Link.TButton",
                 command=lambda item=recording: self._open_lecture_folder(item),
+            ).pack(side="left", padx=(6, 0))
+            SurfaceButton(
+                management,
+                text="В корзину",
+                style="Link.TButton",
+                command=lambda item=recording: self._trash_library_recording(item),
             ).pack(side="left", padx=(6, 0))
 
             if index < len(filtered) - 1:
@@ -1759,10 +1806,16 @@ class StudyApp(tk.Tk):
                     row=index * 2 + 1,
                     column=0,
                     sticky="ew",
-                    padx=20,
+                    padx=24,
                 )
 
         self._bind_mousewheel_tree(canvas, canvas)
+
+    @staticmethod
+    def _fit_library_title(label: tk.Label) -> None:
+        width = max(120, label.winfo_width())
+        if int(label.cget("wraplength")) != width:
+            label.configure(wraplength=width)
 
     @staticmethod
     def _format_bytes(value: int) -> str:
@@ -1866,7 +1919,7 @@ class StudyApp(tk.Tk):
 
                         messagebox.showerror("Ошибка восстановления", str(exc))
 
-                ttk.Button(
+                SurfaceButton(
                     row,
                     text="Восстановить",
                     style="Secondary.TButton",
@@ -1882,7 +1935,7 @@ class StudyApp(tk.Tk):
                 empty_trash(self.app_paths.data_dir)
                 refresh_trash()
 
-        empty_btn = ttk.Button(
+        empty_btn = SurfaceButton(
             footer,
             text="Очистить корзину",
             style="Secondary.TButton",
@@ -1890,7 +1943,7 @@ class StudyApp(tk.Tk):
         )
         empty_btn.pack(side="left")
 
-        ttk.Button(
+        SurfaceButton(
             footer,
             text="Закрыть",
             style="Primary.TButton",
@@ -1958,7 +2011,7 @@ class StudyApp(tk.Tk):
                 background=PALETTE["surface"],
             ).pack(side="left", padx=8)
 
-        ttk.Button(
+        SurfaceButton(
             body,
             text="Закрыть",
             style="Primary.TButton",
@@ -2005,21 +2058,22 @@ class StudyApp(tk.Tk):
             self._set_import_status(str(exc), PALETTE["danger"])
 
     def show_new_lecture(self) -> None:
+        self._mark_navigation("new")
         self._import_status.set("")
         screen = ttk.Frame(self.content, style="TFrame")
         screen.configure(padding=(48, 36, 48, 40))
         screen.grid_columnconfigure(0, weight=1)
 
-        ttk.Button(
+        SurfaceButton(
             screen,
-            text="← К библиотеке",
+            text="К библиотеке",
             style="Secondary.TButton",
             command=self.show_library,
         ).grid(row=0, column=0, sticky="w")
 
         tk.Label(
             screen,
-            text="Новая лекция",
+            text="Добавить лекцию",
             font=self.type.title,
             foreground=PALETTE["ink"],
             background=PALETTE["canvas"],
@@ -2062,7 +2116,7 @@ class StudyApp(tk.Tk):
             wraplength=720,
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 15))
-        source_entry = ttk.Entry(
+        source_entry = SurfaceEntry(
             source_panel,
             textvariable=self._bbb_url,
             style="Source.TEntry",
@@ -2071,7 +2125,7 @@ class StudyApp(tk.Tk):
         source_entry.focus_set()
         source_entry.bind("<Return>", lambda _: self.start_bbb_import())
 
-        self._import_button = ttk.Button(
+        self._import_button = SurfaceButton(
             source_panel,
             text="Добавить по ссылке",
             style="Primary.TButton",
@@ -2102,7 +2156,7 @@ class StudyApp(tk.Tk):
             wraplength=720,
             justify="left",
         ).grid(row=5, column=0, sticky="w", pady=(5, 0))
-        ttk.Button(
+        SurfaceButton(
             source_panel,
             text="Выбрать файл",
             style="Secondary.TButton",
@@ -2496,7 +2550,7 @@ class StudyApp(tk.Tk):
 
         actions = tk.Frame(panel, background=PALETTE["surface"])
         actions.grid(row=8, column=0, sticky="w")
-        self._processing_retry_button = ttk.Button(
+        self._processing_retry_button = SurfaceButton(
             actions,
             text="Повторить",
             style="Primary.TButton",
@@ -2504,7 +2558,7 @@ class StudyApp(tk.Tk):
         )
         self._processing_retry_button.pack(side="left")
         self._processing_retry_button.pack_forget()
-        self._processing_return_button = ttk.Button(
+        self._processing_return_button = SurfaceButton(
             actions,
             text="Вернуться в библиотеку",
             style="Secondary.TButton",
@@ -2512,7 +2566,7 @@ class StudyApp(tk.Tk):
             state="disabled",
         )
         self._processing_return_button.pack(side="left")
-        self._processing_cancel_button = ttk.Button(
+        self._processing_cancel_button = SurfaceButton(
             actions,
             text="Отменить",
             style="Secondary.TButton",
@@ -2728,7 +2782,7 @@ class StudyApp(tk.Tk):
         screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
 
-        ttk.Button(
+        SurfaceButton(
             screen,
             text="← К библиотеке",
             style="Secondary.TButton",
@@ -2804,7 +2858,7 @@ class StudyApp(tk.Tk):
             wraplength=590,
             justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(
+        SurfaceButton(
             panel,
             text=api_action_text,
             style=api_action_style,
@@ -2855,7 +2909,7 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["muted"],
             background=PALETTE["surface"],
         ).pack(side="left")
-        self._chatgpt_model_combobox = ttk.Combobox(
+        self._chatgpt_model_combobox = SurfaceCombobox(
             chatgpt_model_row,
             textvariable=self._settings_chatgpt_model,
             values=(self.settings.chatgpt_model,),
@@ -2868,7 +2922,7 @@ class StudyApp(tk.Tk):
             "<<ComboboxSelected>>",
             lambda _: self._set_active_chatgpt_model(self._settings_chatgpt_model.get()),
         )
-        ttk.Button(
+        SurfaceButton(
             panel,
             textvariable=self._chatgpt_generation_action,
             style="Primary.TButton",
@@ -2896,7 +2950,7 @@ class StudyApp(tk.Tk):
             foreground=PALETTE["muted"],
             background=PALETTE["surface"],
         ).grid(row=9, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(
+        SurfaceButton(
             panel,
             text="Выбрать DeepSeek",
             style="Secondary.TButton",
@@ -2972,7 +3026,7 @@ class StudyApp(tk.Tk):
         screen.configure(padding=(36, 28, 36, 36))
         screen.grid_columnconfigure(0, weight=1)
 
-        ttk.Button(
+        SurfaceButton(
             screen,
             text="← Назад к выбору",
             style="Secondary.TButton",
@@ -3085,14 +3139,14 @@ class StudyApp(tk.Tk):
             elif flow_type == "deepseek_handoff":
                 self._launch_active_handoff()
 
-        ttk.Button(
+        SurfaceButton(
             btn_row,
             text="Передать и продолжить",
             style="Primary.TButton",
             command=on_confirm,
         ).pack(side="left")
 
-        ttk.Button(
+        SurfaceButton(
             btn_row,
             text="Отмена",
             style="Secondary.TButton",
@@ -3511,7 +3565,7 @@ class StudyApp(tk.Tk):
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(2, weight=1)
 
-        ttk.Button(
+        SurfaceButton(
             screen,
             text="← Выбрать другой чат",
             style="Secondary.TButton",
@@ -3568,13 +3622,13 @@ class StudyApp(tk.Tk):
             background=PALETTE["surface"],
             justify="left",
         ).grid(row=2, column=0, sticky="w")
-        ttk.Button(
+        SurfaceButton(
             panel,
             text=f"Открыть {provider} и скопировать инструкцию",
             style="Primary.TButton",
             command=lambda: self.show_consent_screen(recording, "deepseek_handoff"),
         ).grid(row=3, column=0, sticky="w", pady=(22, 0))
-        ttk.Button(
+        SurfaceButton(
             panel,
             text="Я получил ответ — вставить и сохранить",
             style="Secondary.TButton",
@@ -3628,7 +3682,7 @@ class StudyApp(tk.Tk):
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(3, weight=1)
 
-        ttk.Button(
+        SurfaceButton(
             screen,
             text="← К выбору чата",
             style="Secondary.TButton",
@@ -3678,7 +3732,7 @@ class StudyApp(tk.Tk):
 
         actions = tk.Frame(screen, background=PALETTE["canvas"])
         actions.grid(row=4, column=0, sticky="ew", pady=(16, 0))
-        ttk.Button(
+        SurfaceButton(
             actions,
             text="Сохранить lesson.md",
             style="Primary.TButton",
@@ -3725,7 +3779,7 @@ class StudyApp(tk.Tk):
         screen.grid_columnconfigure(0, weight=1)
         screen.grid_rowconfigure(3, weight=1)
 
-        ttk.Button(
+        SurfaceButton(
             screen,
             text="← К библиотеке",
             style="Secondary.TButton",
@@ -3843,7 +3897,7 @@ class StudyApp(tk.Tk):
         actions = tk.Frame(screen, background=PALETTE["canvas"])
         actions.grid(row=4, column=0, sticky="ew", pady=(16, 0))
 
-        ttk.Button(
+        SurfaceButton(
             actions,
             text="Изменить конспект",
             style="Primary.TButton",
@@ -3879,14 +3933,14 @@ class StudyApp(tk.Tk):
             if dest:
                 export_lecture_archive(default_lecture_directory(recording), Path(dest))
 
-        ttk.Button(
+        SurfaceButton(
             actions,
             text="Экспорт в HTML",
             style="Link.TButton",
             command=export_html,
         ).pack(side="left", padx=(8, 0))
 
-        ttk.Button(
+        SurfaceButton(
             actions,
             text="Экспорт архива (.zip)",
             style="Link.TButton",
@@ -3894,7 +3948,9 @@ class StudyApp(tk.Tk):
         ).pack(side="left", padx=(8, 0))
 
         search_var = tk.StringVar()
-        search_entry = ttk.Entry(actions, textvariable=search_var, width=20, style="Source.TEntry")
+        search_entry = SurfaceEntry(
+            actions, textvariable=search_var, width=20, style="Source.TEntry"
+        )
         search_entry.pack(side="left", padx=(16, 0))
 
         def find_next() -> None:
@@ -3912,7 +3968,7 @@ class StudyApp(tk.Tk):
                 reader.see(found)
                 reader.mark_set("insert", found)
 
-        ttk.Button(actions, text="Найти", style="Link.TButton", command=find_next).pack(
+        SurfaceButton(actions, text="Найти", style="Link.TButton", command=find_next).pack(
             side="left", padx=(6, 0)
         )
 
@@ -3934,7 +3990,7 @@ class StudyApp(tk.Tk):
             except RuntimeError as exc:
                 messagebox.showerror("Экспорт PDF", str(exc))
 
-        ttk.Button(actions, text="Экспорт в PDF", style="Link.TButton", command=export_pdf).pack(
+        SurfaceButton(actions, text="Экспорт в PDF", style="Link.TButton", command=export_pdf).pack(
             side="left", padx=(8, 0)
         )
 

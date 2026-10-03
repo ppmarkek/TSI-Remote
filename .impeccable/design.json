@@ -1,0 +1,249 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-03T08:43:19Z",
+  "title": "Design System: Конспект",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Cool canvas"
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "White paper"
+      },
+      "surface-soft": {
+        "role": "neutral",
+        "displayName": "Soft grey"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink"
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Quiet text"
+      },
+      "faint": {
+        "role": "neutral",
+        "displayName": "Secondary grey"
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Separator grey"
+      },
+      "primary": {
+        "role": "primary",
+        "displayName": "Graphite"
+      },
+      "primary-hover": {
+        "role": "primary",
+        "displayName": "Graphite hover"
+      },
+      "primary-pressed": {
+        "role": "primary",
+        "displayName": "Graphite pressed"
+      },
+      "primary-soft": {
+        "role": "neutral",
+        "displayName": "Pale graphite"
+      },
+      "focus": {
+        "role": "semantic",
+        "displayName": "Focus amber"
+      },
+      "success": {
+        "role": "semantic",
+        "displayName": "Completion green"
+      },
+      "success-soft": {
+        "role": "semantic",
+        "displayName": "Completion surface"
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "Error crimson"
+      },
+      "danger-hover": {
+        "role": "semantic",
+        "displayName": "Danger hover surface"
+      },
+      "danger-pressed": {
+        "role": "semantic",
+        "displayName": "Danger pressed surface"
+      },
+      "navigation-ink": {
+        "role": "neutral",
+        "displayName": "Navigation graphite"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Screen title",
+        "purpose": "Native Tk title role, measured in points."
+      },
+      "headline": {
+        "displayName": "Panel heading",
+        "purpose": "Native Tk heading role."
+      },
+      "title": {
+        "displayName": "Lecture title",
+        "purpose": "Native Tk subheading role."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Native explanatory text, entries, and navigation."
+      },
+      "body-strong": {
+        "displayName": "Action label",
+        "purpose": "Native bold body role for primary and secondary buttons."
+      },
+      "label": {
+        "displayName": "Metadata label",
+        "purpose": "Native small and secondary roles for status, dates, storage, and management links."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "screen-duration",
+        "value": "180ms",
+        "purpose": "Native navigation cross-slide; nine linear frames. Disabled by --reduce-motion or the Windows client-area animation preference."
+      },
+      {
+        "name": "screen-incoming-travel",
+        "value": "18px",
+        "purpose": "Incoming screen starts at this horizontal offset and ends at zero."
+      },
+      {
+        "name": "screen-outgoing-travel",
+        "value": "-12px",
+        "purpose": "Outgoing screen moves left before destruction."
+      }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Illustrative HTML translation of a native ttk button; runtime control surfaces and keyboard behavior remain Tk-owned.",
+      "html": "<button class=\"ds-primary\" type=\"button\">Подготовить</button>",
+      "css": ".ds-primary { background: #303640; color: #FFFFFF; border: none; border-radius: 7px; padding: 4px 12px; font: 700 11pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-primary:hover { background: #424A57; } .ds-primary:active { background: #222730; } .ds-primary:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; } .ds-primary:disabled { background: #F0F2F5; color: #686F7A; }"
+    },
+    {
+      "name": "Header import action",
+      "kind": "button",
+      "refersTo": "button-header",
+      "description": "Illustrative HTML translation of a native ttk button; runtime control surfaces and keyboard behavior remain Tk-owned.",
+      "html": "<button class=\"ds-header-action\" type=\"button\">Добавить лекцию</button>",
+      "css": ".ds-header-action { background: #303640; color: #FFFFFF; border: none; border-radius: 7px; padding: 3px 14px; font: 700 11pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-header-action:hover { background: #424A57; } .ds-header-action:active { background: #222730; } .ds-header-action:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; } .ds-header-action:disabled { background: #F0F2F5; color: #686F7A; }"
+    },
+    {
+      "name": "Secondary action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Illustrative HTML translation of a native ttk button; runtime control surfaces and keyboard behavior remain Tk-owned.",
+      "html": "<button class=\"ds-secondary\" type=\"button\">Найти</button>",
+      "css": ".ds-secondary { background: #FFFFFF; color: #24272D; border: 1px solid #E2E5EA; border-radius: 7px; padding: 4px 12px; font: 700 11pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-secondary:hover { background: #F0F2F5; } .ds-secondary:active { background: #E2E5EA; } .ds-secondary:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; } .ds-secondary:disabled { background: #F0F2F5; color: #686F7A; }"
+    },
+    {
+      "name": "Management link",
+      "kind": "button",
+      "refersTo": "button-link",
+      "description": "Illustrative HTML translation of a native ttk button; runtime control surfaces and keyboard behavior remain Tk-owned.",
+      "html": "<button class=\"ds-link\" type=\"button\">Переименовать</button>",
+      "css": ".ds-link { background: #FFFFFF; color: #5B616D; border: none; border-radius: 7px; padding: 2px 5px; font: 400 10pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-link:hover { background: #F0F2F5; } .ds-link:active { background: #E2E5EA; } .ds-link:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; } .ds-link:disabled { background: #F0F2F5; color: #686F7A; }"
+    },
+    {
+      "name": "Danger link",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Illustrative HTML translation of a native ttk button; runtime control surfaces and keyboard behavior remain Tk-owned.",
+      "html": "<button class=\"ds-danger\" type=\"button\">Очистить корзину</button>",
+      "css": ".ds-danger { background: #FFFFFF; color: #B4233C; border: none; border-radius: 7px; padding: 2px 5px; font: 400 10pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-danger:hover { background: #FAECEE; } .ds-danger:active { background: #F5DDE1; } .ds-danger:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; } .ds-danger:disabled { background: #F0F2F5; color: #686F7A; }"
+    },
+    {
+      "name": "Search field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Illustrative entry and visible library-search label. The real entry uses native editing and measured ttk geometry.",
+      "html": "<label class=\"ds-search-label\">Поиск по библиотеке<input class=\"ds-search-input\" type=\"search\" aria-label=\"Поиск по библиотеке\" value=\"Лекция\"></label>",
+      "css": ".ds-search-label { display: grid; gap: 6px; color: #5B616D; font: 400 10pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-search-input { color: #24272D; background: #FFFFFF; border: 1px solid #E2E5EA; border-radius: 7px; padding: 4px 6px; font: 400 11pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-search-input:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; } .ds-search-input:disabled { background: #F0F2F5; }"
+    },
+    {
+      "name": "State dropdown",
+      "kind": "input",
+      "refersTo": "select",
+      "description": "Illustrative native ttk readonly dropdown. The application popup and arrow remain platform controls.",
+      "html": "<select class=\"ds-state-select\" aria-label=\"Состояние лекции\"><option>Все состояния</option><option>Импортировано</option><option>Подготовлено</option><option>Пакет готов</option><option>Конспект готов</option></select>",
+      "css": ".ds-state-select { color: #24272D; background: #FFFFFF; border: 1px solid #E2E5EA; border-radius: 7px; padding: 3px 6px; font: 400 11pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-state-select:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; } .ds-state-select:disabled { background: #F0F2F5; color: #686F7A; }"
+    },
+    {
+      "name": "Desktop navigation",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "Illustrative selected and resting navigation buttons. Native layout places these beside the brand within the 64px navigation strip.",
+      "html": "<nav class=\"ds-navigation\" aria-label=\"Основная навигация\"><button class=\"ds-navigation-tab\" type=\"button\" aria-current=\"page\">Библиотека</button><button class=\"ds-navigation-tab\" type=\"button\">Настройки</button></nav>",
+      "css": ".ds-navigation { display: flex; gap: 4px; background: #FFFFFF; } .ds-navigation-tab { background: #FFFFFF; color: #343A45; border: none; border-radius: 7px; padding: 2px 12px; font: 400 11pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-navigation-tab:hover { background: #F0F2F5; color: #24272D; } .ds-navigation-tab[aria-current=page], .ds-navigation-tab:active { background: #E9EDF2; color: #24272D; } .ds-navigation-tab:focus-visible { outline: 1px solid #B45309; outline-offset: -1px; }"
+    },
+    {
+      "name": "Completion label",
+      "kind": "chip",
+      "refersTo": "status-ready",
+      "description": "Illustrative flat, noninteractive native status label. Color confirms completion alongside explicit text.",
+      "html": "<span class=\"ds-status-ready\">Конспект готов</span>",
+      "css": ".ds-status-ready { display: inline-block; background: #EAF4EE; color: #23654E; border-radius: 0; padding: 4px 10px; font: 400 10pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; }"
+    },
+    {
+      "name": "Lecture row",
+      "kind": "card",
+      "refersTo": "lecture-row",
+      "description": "Illustrative row content and an inset separator. Runtime Tk row geometry includes status, next action, and management controls; the title wraps to measured available width.",
+      "html": "<article class=\"ds-lecture-row\"><div class=\"ds-lecture-content\"><span class=\"ds-source-marker\">BBB</span><div class=\"ds-lecture-copy\"><div class=\"ds-lecture-title\">Введение в курс</div><div class=\"ds-lecture-date\">3 октября 2026</div></div></div><div class=\"ds-lecture-separator\"></div></article>",
+      "css": ".ds-lecture-row { background: #FFFFFF; color: #24272D; border-radius: 0; } .ds-lecture-content { display: flex; gap: 18px; padding: 18px 24px; } .ds-source-marker { background: #F0F2F5; color: #5B616D; font: 400 10pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-lecture-copy { flex: 1; min-width: 0; } .ds-lecture-title { font: 700 12pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; overflow-wrap: break-word; } .ds-lecture-date { color: #5B616D; margin-top: 6px; font: 400 10pt 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', Arial, sans-serif; } .ds-lecture-separator { height: 1px; background: #E2E5EA; margin: 0 24px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Светлый и спокойный",
+    "overview": "A readable local lecture archive expressed through cool white, pale grey, and graphite. The user's chosen direction is calm and light: clear priorities, readable system typography, and quiet surfaces support focused study.\n\nThe implemented application remains native Tk/ttk. Flat groups and separators organize material; rounded controls provide consistent hover, pressed, selected, and keyboard-focus feedback. The source of truth is src/konspekt/app.py, ui_surfaces.py, and window_chrome.py; the accompanying HTML snippets are illustrative panel previews, not application components.",
+    "keyCharacteristics": [
+      "Cool white and pale grey surfaces.",
+      "Graphite primary actions with readable system type.",
+      "Flat lecture rows with one-pixel separators.",
+      "Green confirms completed work; amber identifies keyboard focus.",
+      "Native desktop controls and window behavior."
+    ],
+    "rules": [
+      {
+        "name": "The State Color Rule",
+        "body": "Keep primary actions graphite. Reserve green for completed work and retain a text label alongside semantic color.",
+        "section": "colors"
+      },
+      {
+        "name": "The Native Type Rule",
+        "body": "Use the selected system family throughout the desktop UI and retain the point-sized hierarchy.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Surface Rule",
+        "body": "Keep content surfaces flat; communicate hierarchy through type, spacing, tonal fill, and separators.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep primary actions graphite and semantic states labelled.",
+      "Do use the selected native system font and the point-sized hierarchy.",
+      "Do retain rounded control surfaces, flat content groups, and measured title wrapping.",
+      "Do preserve ttk keyboard interaction and OS window behavior.",
+      "Do honor the implemented reduced-motion path and native high-contrast caption fallback."
+    ],
+    "donts": [
+      "Don't reintroduce the dark navigation or bright blue caption from the rejected direction.",
+      "Don't add playful education motifs, loud gradients, crowded card grids, or decorative animation.",
+      "Don't treat illustrative HTML sidecar snippets as a migration to a browser framework.",
+      "Don't replace the native caption with custom window buttons or hard-code OS corner geometry."
+    ]
+  }
+}
