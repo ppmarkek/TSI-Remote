@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from konspekt.lesson_export import (
+    _render_pdf_page_images,
     export_lesson_to_html_file,
     export_lesson_to_pdf_file,
     render_lesson_html,
@@ -26,6 +27,27 @@ class LessonExportTests(unittest.TestCase):
         self.assertIn("Временная сложность", html_out)
         self.assertIn("Оглавление", html_out)
         self.assertIn("<!DOCTYPE html>", html_out)
+
+    def test_render_lesson_html_uses_the_reader_markup(self) -> None:
+        html_out = render_lesson_html(
+            "Конспект <b>",
+            "# Тема\n\n## Сортировки [00:12:34]\n\n"
+            "| Алгоритм | Сложность |\n|---|---|\n| **Быстрая** | O(n log n) |\n\n"
+            "<script>alert(1)</script>",
+        )
+
+        self.assertIn('<a href="#sec-2">Сортировки</a>', html_out)
+        self.assertIn('<h2 id="sec-2">', html_out)
+        self.assertIn('<span class="ts">12:34</span>', html_out)
+        self.assertIn("<td><strong>Быстрая</strong></td>", html_out)
+        self.assertIn("<title>Конспект &lt;b&gt;</title>", html_out)
+        self.assertNotIn("<script", html_out)
+
+    def test_render_lesson_html_without_headings(self) -> None:
+        html_out = render_lesson_html("Пусто", "")
+
+        self.assertIn("Разделы не найдены.", html_out)
+        self.assertNotIn("doc-meta", html_out.split("</style>")[1])
 
     def test_export_lesson_to_html_file_writes_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -54,6 +76,16 @@ class LessonExportTests(unittest.TestCase):
             self.assertTrue(pdf_bytes.startswith(b"%PDF-1.4"))
             self.assertTrue(pdf_bytes.rstrip().endswith(b"%%EOF"))
             self.assertGreater(len(pdf_bytes), 200)
+
+    def test_builtin_pdf_renderer_handles_rich_markdown(self) -> None:
+        pages = _render_pdf_page_images(
+            "Конспект",
+            "# Тема\n\n1. **Вопрос?**\n   Ответ: да.\n\n"
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\n```python\nx = 1\n```\n\n"
+            "> [!TIP]\n> Совет\n\n- [x] задача\n",
+        )
+
+        self.assertGreaterEqual(len(pages), 1)
 
 
 if __name__ == "__main__":

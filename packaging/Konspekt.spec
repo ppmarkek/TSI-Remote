@@ -20,6 +20,10 @@ block_cipher = None
 datas: list[tuple[str, str]] = [
     (str(project_root / "assets" / "konspekt.png"), "assets"),
 ]
+# The HTML interface: index.html, styles.css and app.js.
+for static_file in sorted((package_root / "web" / "static").iterdir()):
+    if static_file.is_file():
+        datas.append((str(static_file), "konspekt/web/static"))
 binaries: list[tuple[str, str]] = []
 hiddenimports: list[str] = []
 
@@ -64,6 +68,10 @@ hiddenimports.extend(
         "tokenizers",
         "huggingface_hub",
         "imageio_ffmpeg",
+        "konspekt.web.api",
+        "konspekt.web.main",
+        "konspekt.web.server",
+        "konspekt.web.tasks",
         "webview",
         "webview.platforms.winforms",
         "webview.platforms.edgechromium",

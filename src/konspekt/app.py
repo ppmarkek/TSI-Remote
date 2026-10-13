@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -3848,7 +3849,7 @@ class StudyApp(tk.Tk):
         )
         reader.grid(row=0, column=1, sticky="nsew")
         reader.insert("1.0", content)
-        rec_key = recording.lecture_id or recording.meeting_id
+        rec_key = getattr(recording, "lecture_id", None) or recording.meeting_id
         saved_pos = self._reading_positions.get(rec_key)
         if saved_pos is not None:
             reader.after(50, lambda: reader.yview_moveto(saved_pos))
@@ -4176,6 +4177,18 @@ class StudyApp(tk.Tk):
 
 
 def main() -> None:
+    # The HTML interface is the default; the Tk one stays as a fallback for
+    # machines without a working WebView and for "--classic".
+    if "--classic" not in sys.argv and os.environ.get("KONSPEKT_CLASSIC_UI") != "1":
+        from .web.main import run_web_app
+
+        try:
+            if run_web_app(sys.argv):
+                return
+        except SystemExit:
+            raise
+        except Exception as exc:
+            record_exception("web.main", exc)
     app = StudyApp()
     if "--smoke-test-gui" in sys.argv:
         app.after(500, app.destroy)

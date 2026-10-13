@@ -26,6 +26,35 @@ def style_native_window(window: tk.Tk | tk.Toplevel, palette: dict[str, str]) ->
         import ctypes
         from ctypes import wintypes
 
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        hwnd = user32.GetAncestor(window.winfo_id(), 2)  # GA_ROOT: Tk's wrapper HWND
+    except (OSError, AttributeError, tk.TclError):
+        return
+    style_native_hwnd(
+        hwnd,
+        caption=palette["sidebar"],
+        text=palette["muted"],
+        border=palette["line"],
+    )
+
+
+def style_native_hwnd(
+    hwnd: int | None,
+    *,
+    caption: str,
+    text: str,
+    border: str,
+    dark: bool = False,
+) -> None:
+    """Apply caption colours to a top-level window handle (no-op in high contrast)."""
+    if sys.platform != "win32" or not hwnd:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
         class HighContrast(ctypes.Structure):
             _fields_ = [
                 ("cbSize", wintypes.UINT),
@@ -34,8 +63,6 @@ def style_native_window(window: tk.Tk | tk.Toplevel, palette: dict[str, str]) ->
             ]
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
-        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-        user32.GetAncestor.restype = wintypes.HWND
         user32.SystemParametersInfoW.argtypes = [
             wintypes.UINT,
             wintypes.UINT,
@@ -49,9 +76,6 @@ def style_native_window(window: tk.Tk | tk.Toplevel, palette: dict[str, str]) ->
             if contrast.dwFlags & 1:  # HCF_HIGHCONTRASTON
                 return
 
-        hwnd = user32.GetAncestor(window.winfo_id(), 2)  # GA_ROOT: Tk's wrapper HWND
-        if not hwnd:
-            return
         dwm = ctypes.WinDLL("dwmapi")
         dwm.DwmSetWindowAttribute.argtypes = [
             wintypes.HWND,
@@ -61,15 +85,46 @@ def style_native_window(window: tk.Tk | tk.Toplevel, palette: dict[str, str]) ->
         ]
         dwm.DwmSetWindowAttribute.restype = ctypes.c_long
         attributes = {
-            20: 0,  # DWMWA_USE_IMMERSIVE_DARK_MODE
+            20: 1 if dark else 0,  # DWMWA_USE_IMMERSIVE_DARK_MODE
             33: 2,  # DWMWA_WINDOW_CORNER_PREFERENCE: DWMWCP_ROUND
-            34: _colorref(palette["line"]),  # DWMWA_BORDER_COLOR
-            35: _colorref(palette["sidebar"]),  # DWMWA_CAPTION_COLOR
-            36: _colorref(palette["muted"]),  # DWMWA_TEXT_COLOR
+            34: _colorref(border),  # DWMWA_BORDER_COLOR
+            35: _colorref(caption),  # DWMWA_CAPTION_COLOR
+            36: _colorref(text),  # DWMWA_TEXT_COLOR
         }
         for attribute, number in attributes.items():
             value = wintypes.DWORD(number)
             dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
-    except (OSError, AttributeError, tk.TclError):
+    except (OSError, AttributeError, ValueError):
         # Unsupported DWM attributes fail harmlessly on older Windows builds.
         return
+
+
+def system_prefers_dark() -> bool:
+    """Whether the OS asks applications for a dark appearance."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return int(value) == 0
+        except (OSError, ValueError):
+            return False
+    if sys.platform == "darwin":
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.stdout.strip().lower() == "dark"
+    return False

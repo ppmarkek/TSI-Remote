@@ -27,6 +27,10 @@ def collect_shared_packaging_info(
     hiddenimports: list[str] = [
         "konspekt",
         "konspekt.platform_services",
+        "konspekt.web.api",
+        "konspekt.web.main",
+        "konspekt.web.server",
+        "konspekt.web.tasks",
         "keyring",
         "keyring.backends",
         "platformdirs",
@@ -43,6 +47,12 @@ def collect_shared_packaging_info(
         asset = assets_dir / asset_name
         if asset.is_file():
             datas.append((str(asset), "assets"))
+
+    # The HTML interface: index.html, styles.css and app.js.
+    static_dir = project_root / "src" / "konspekt" / "web" / "static"
+    for static_file in sorted(static_dir.iterdir()):
+        if static_file.is_file():
+            datas.append((str(static_file), "konspekt/web/static"))
 
     tesseract_executable = shutil.which("tesseract")
     if not tesseract_executable:
