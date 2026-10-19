@@ -86,7 +86,15 @@ hiddenimports.extend(
     ]
 )
 
-tesseract_executable = shutil.which("tesseract")
+# build_konspekt.ps1 passes the runtime it checked and the pinned models it lacks.
+tesseract_override = os.environ.get("KONSPEKT_TESSERACT_DIR")
+if tesseract_override:
+    candidate = Path(tesseract_override) / "tesseract.exe"
+    if not candidate.is_file():
+        raise SystemExit(f"KONSPEKT_TESSERACT_DIR has no tesseract.exe: {tesseract_override}")
+    tesseract_executable = str(candidate)
+else:
+    tesseract_executable = shutil.which("tesseract")
 if not tesseract_executable:
     candidate = (
         Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
@@ -97,11 +105,37 @@ if not tesseract_executable:
 if not tesseract_executable:
     raise SystemExit("Tesseract is required to build Konspekt. Run setup_local_ai.ps1 first.")
 
+extra_models = [
+    Path(model) for model in os.environ.get("KONSPEKT_EXTRA_TESSDATA", "").split(os.pathsep) if model
+]
+for model in extra_models:
+    if not model.is_file():
+        raise SystemExit(f"Extra Tesseract language model not found: {model}")
+extra_model_names = {model.name for model in extra_models}
+
 tesseract_root = Path(tesseract_executable).parent
+tessdata_destination = Path("tesseract") / "tessdata"
 for file_path in tesseract_root.rglob("*"):
     if file_path.is_file():
         destination = Path("tesseract") / file_path.relative_to(tesseract_root).parent
+        if destination == tessdata_destination and file_path.name in extra_model_names:
+            continue
         datas.append((str(file_path), str(destination)))
+datas.extend((str(model), str(tessdata_destination)) for model in extra_models)
+
+bundled_models = {
+    Path(source).name
+    for source, destination in datas
+    if Path(destination) == tessdata_destination and Path(source).stat().st_size > 0
+}
+missing_models = sorted({"eng.traineddata", "rus.traineddata"} - bundled_models)
+if missing_models:
+    raise SystemExit(
+        "Tesseract language models are missing: "
+        + ", ".join(missing_models)
+        + f" (looked in {tesseract_root / 'tessdata'}). Build with scripts\\build_konspekt.ps1, "
+        "which fetches the pinned tessdata_fast models, or copy them there."
+    )
 
 a = Analysis(
     [str(package_root / "__main__.py")],

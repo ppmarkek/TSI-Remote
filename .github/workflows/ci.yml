@@ -46,7 +46,11 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     env:
+      # Keep in sync with scripts/build_konspekt.ps1.
       TESSDATA_REF: 87416418657359cb625c412a48b6e1d6d41c29bd
+      RUS_TRAINEDDATA_SHA256: e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225
+      TESSERACT_WINDOWS_VERSION: 5.4.0.20240606
+      TESSERACT_WINDOWS_INSTALLER_SHA256: c885fff6998e0608ba4bb8ab51436e1c6775c2bafc2559a19b423e18678b60c9
     strategy:
       fail-fast: false
       matrix:
@@ -89,8 +93,68 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install tesseract -y --no-progress
-          "$env:ProgramFiles\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # The pinned UB-Mannheim installer comes first (GitHub release, then the
+          # UB-Mannheim server, both checked against one SHA256); Chocolatey is the
+          # last resort. Every source is retried with backoff.
+          $tesseractRoot = Join-Path $env:ProgramFiles "Tesseract-OCR"
+          $tesseract = Join-Path $tesseractRoot "tesseract.exe"
+          $version = $env:TESSERACT_WINDOWS_VERSION
+          $installerName = "tesseract-ocr-w64-setup-$version.exe"
+          $installer = Join-Path $env:RUNNER_TEMP $installerName
+
+          function Install-PinnedInstaller([string] $Uri) {
+            Invoke-WebRequest -Uri $Uri -OutFile $installer
+            $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+            if ($hash -ne $env:TESSERACT_WINDOWS_INSTALLER_SHA256) {
+              Remove-Item -LiteralPath $installer -Force
+              throw "SHA256 mismatch for ${installerName}: got $hash."
+            }
+            $process = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "$installerName exited with code $($process.ExitCode)."
+            }
+          }
+
+          $sources = [ordered]@{
+            "GitHub release UB-Mannheim/tesseract v$version" = {
+              Install-PinnedInstaller "https://github.com/UB-Mannheim/tesseract/releases/download/v$version/$installerName"
+            }
+            "digi.bib.uni-mannheim.de $version" = {
+              Install-PinnedInstaller "https://digi.bib.uni-mannheim.de/tesseract/$installerName"
+            }
+            "Chocolatey (latest tesseract package)" = {
+              choco install tesseract -y --no-progress
+              # 1641 and 3010 mean "installed, reboot required".
+              if ($LASTEXITCODE -notin 0, 1641, 3010) {
+                throw "choco install exited with code $LASTEXITCODE."
+              }
+            }
+          }
+
+          $attempts = 3
+          $failures = @()
+          $installedFrom = $null
+          foreach ($source in $sources.GetEnumerator()) {
+            for ($attempt = 1; $attempt -le $attempts -and -not $installedFrom; $attempt++) {
+              try {
+                & $source.Value
+                if (-not (Test-Path -LiteralPath $tesseract)) { throw "$tesseract was not created." }
+                $installedFrom = $source.Key
+              } catch {
+                $failures += "$($source.Key), attempt ${attempt}/${attempts}: $($_.Exception.Message)"
+                Write-Warning $failures[-1]
+                if ($attempt -lt $attempts) { Start-Sleep -Seconds (15 * [math]::Pow(2, $attempt - 1)) }
+              }
+            }
+            if ($installedFrom) { break }
+          }
+          if (-not $installedFrom) {
+            throw ("Tesseract OCR could not be installed from any source:`n  " + ($failures -join "`n  "))
+          }
+
+          Write-Host "Installed Tesseract OCR from $installedFrom."
+          & $tesseract --version
+          $tesseractRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install Russian OCR model (Windows)
         if: runner.os == 'Windows'
@@ -101,7 +165,11 @@ jobs:
           $rusModel = Join-Path $tessdataDir "rus.traineddata"
           New-Item -ItemType Directory -Force -Path $tessdataDir | Out-Null
           $uri = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/$env:TESSDATA_REF/rus.traineddata"
-          Invoke-WebRequest -Uri $uri -OutFile $rusModel
+          Invoke-WebRequest -Uri $uri -OutFile $rusModel -MaximumRetryCount 4 -RetryIntervalSec 15
+          $rusHash = (Get-FileHash -LiteralPath $rusModel -Algorithm SHA256).Hash
+          if ($rusHash -ne $env:RUS_TRAINEDDATA_SHA256) {
+            throw "SHA256 mismatch for rus.traineddata at tessdata_fast@${env:TESSDATA_REF}: got $rusHash."
+          }
           $engModel = Join-Path $tessdataDir "eng.traineddata"
           if (-not (Test-Path $engModel) -or (Get-Item $engModel).Length -le 0) {
             throw "English Tesseract language model is missing."
