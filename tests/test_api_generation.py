@@ -259,14 +259,17 @@ class ApiGenerationTests(unittest.TestCase):
         def fake_stream(api_key, model, messages, **kwargs):
             calls.append({"api_key": api_key, "model": model, "messages": messages, **kwargs})
             kwargs["on_text"]("# Claude")
-            return ClaudeReply(text="```markdown\n# Claude lesson\n```", model=model, stop_reason="end_turn")
+            return ClaudeReply(
+                text="```markdown\n# Claude lesson\n```", model=model, stop_reason="end_turn"
+            )
 
         settings = AppSettings(
             api_provider="claude", api_model="claude-opus-5-5", api_key="sk-ant-test"
         )
         progress_updates: list[tuple[int, str]] = []
-        with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "konspekt.api_generation.stream_claude_text", fake_stream
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            mock.patch("konspekt.api_generation.stream_claude_text", fake_stream),
         ):
             directory = Path(temporary)
             self._write_context(directory)
