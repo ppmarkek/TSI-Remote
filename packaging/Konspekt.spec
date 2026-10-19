@@ -34,6 +34,8 @@ for package in (
     "av",
     "tokenizers",
     "huggingface_hub",
+    # The SDK loads its resource modules lazily.
+    "anthropic",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas.extend(package_datas)
@@ -68,6 +70,9 @@ hiddenimports.extend(
         "tokenizers",
         "huggingface_hub",
         "imageio_ffmpeg",
+        "anthropic",
+        "konspekt.chat",
+        "konspekt.claude_api",
         "konspekt.web.api",
         "konspekt.web.main",
         "konspekt.web.server",
