@@ -128,6 +128,8 @@
     flip: '<path d="M4 9a8 8 0 0 1 14-3.5L20 8"/><path d="M20 4v4h-4"/><path d="M20 15a8 8 0 0 1-14 3.5L4 16"/><path d="M4 20v-4h4"/>',
     target: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r=".8" fill="currentColor"/>',
     question: '<circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.5a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6M12 17h.01"/>',
+    chat: '<path d="M7.5 18.5 4 20.5V7a2.5 2.5 0 0 1 2.5-2.5h11A2.5 2.5 0 0 1 20 7v9a2.5 2.5 0 0 1-2.5 2.5z"/><path d="M8.5 9.5h7M8.5 13.5h4.5"/>',
+    stop: '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>',
   };
 
   function icon(name, extra = "") {
@@ -170,6 +172,7 @@
     query: "",
     searchResults: null,
     route: { name: "library" },
+    chatMeta: null,
     chatgpt: null,
     knownTaskStatus: new Map(),
     tasksSeeded: false,
@@ -408,6 +411,9 @@
       <button type="button" class="nav-item ${active("review")}" data-go="#/review">
         ${icon("cards")}<span>Повторение</span>${due ? `<span class="nav-badge">${due > 999 ? "999+" : due}</span>` : ""}
       </button>
+      <button type="button" class="nav-item ${active("chat")}" data-go="#/chat">
+        ${icon("chat")}<span>Чат</span>
+      </button>
       <button type="button" class="nav-item ${active("settings")}" data-go="#/settings">
         ${icon("settings")}<span>Настройки</span>
       </button>`;
@@ -576,12 +582,20 @@
     const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
     if (parts[0] === "lecture" && parts[1]) return { name: "lecture", key: parts[1], tab: parts[2] || "" };
     if (parts[0] === "review") return { name: "review" };
+    if (parts[0] === "chat") return { name: "chat", id: parts[1] || "" };
     if (parts[0] === "settings") return { name: "settings" };
     return { name: "library" };
   }
 
   function route() {
     const next = parseRoute();
+    // A view may handle a change inside itself, e.g. switching between chats.
+    if (currentView && currentView.update && S.route.name === next.name && currentView.update(next)) {
+      closeMenu();
+      S.route = next;
+      renderNav();
+      return;
+    }
     if (currentView && currentView.leave) currentView.leave();
     closeMenu();
     S.route = next;
@@ -590,6 +604,7 @@
     view.innerHTML = "";
     if (next.name === "lecture") currentView = LectureView(view, next.key, next.tab);
     else if (next.name === "review") currentView = ReviewView(view);
+    else if (next.name === "chat") currentView = ChatView(view, next.id);
     else if (next.name === "settings") currentView = SettingsView(view);
     else currentView = LibraryView(view);
   }
@@ -2502,6 +2517,437 @@
     };
   }
 
+  // =================================================================== chat
+  const CHAT_SUGGESTIONS = [
+    "Объясни простыми словами, как работает градиентный спуск",
+    "Составь план подготовки к экзамену на неделю",
+    "Придумай 5 вопросов для самопроверки по теме",
+    "Проверь моё решение задачи и найди ошибки",
+  ];
+
+  function chatDate(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+    const now = new Date();
+    const day = (value) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+    const days = Math.round((day(now) - day(date)) / 86400000);
+    if (days <= 0) return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    if (days === 1) return "вчера";
+    const short = `${pad(date.getDate())}.${pad(date.getMonth() + 1)}`;
+    return date.getFullYear() === now.getFullYear() ? short : `${short}.${date.getFullYear()}`;
+  }
+
+  function ChatView(root, initialId) {
+    root.innerHTML = `<div class="chat-layout">
+      <aside class="chat-side" aria-label="Чаты">
+        <div class="chat-side-head">
+          <span class="chat-side-title">Чаты</span>
+          <button type="button" class="btn btn-sm" id="chat-new">${icon("plus", "icon-sm")}Новый чат</button>
+        </div>
+        <div class="chat-list" id="chat-list"></div>
+      </aside>
+      <section class="chat-main">
+        <header class="chat-head" id="chat-head"></header>
+        <div class="chat-scroll" id="chat-scroll"><div class="chat-thread" id="chat-thread"></div></div>
+        <div class="chat-composer-wrap">
+          <form class="chat-composer" id="chat-form">
+            <textarea id="chat-input" rows="1" placeholder="Напиши сообщение…" aria-label="Сообщение"></textarea>
+            <button type="submit" class="chat-send" id="chat-send" aria-label="Отправить" title="Отправить (Enter)">${icon("send")}</button>
+          </form>
+          <div class="chat-note" id="chat-note"></div>
+        </div>
+      </section>
+    </div>`;
+    const list = $("#chat-list", root);
+    const head = $("#chat-head", root);
+    const scroller = $("#chat-scroll", root);
+    const thread = $("#chat-thread", root);
+    const form = $("#chat-form", root);
+    const input = $("#chat-input", root);
+    const sendButton = $("#chat-send", root);
+    const note = $("#chat-note", root);
+
+    let meta = S.chatMeta;
+    let chatId = initialId || null;
+    let chat = null;
+    let running = false;
+    let error = "";
+    let alive = true;
+    let pollToken = 0;
+    let loadToken = 0;
+
+    const configured = () => Boolean(meta ? meta.api_configured : S.settings && S.settings.api_configured);
+    const nearBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
+    const scrollToBottom = () => {
+      scroller.scrollTop = scroller.scrollHeight;
+    };
+
+    async function loadMeta() {
+      try {
+        meta = await api("chat_list");
+      } catch (err) {
+        if (alive) toast(err.message, { type: "error" });
+        return;
+      }
+      if (!alive) return;
+      S.chatMeta = meta;
+      renderList();
+      renderHead();
+      renderNote();
+      updateComposer();
+      if (!chatId) renderThread();
+    }
+
+    function renderList() {
+      const chats = (meta && meta.chats) || [];
+      if (!chats.length) {
+        list.innerHTML = `<div class="chat-list-empty">Здесь появятся твои разговоры.</div>`;
+        return;
+      }
+      list.innerHTML = chats
+        .map(
+          (item) => `<button type="button" class="chat-item ${item.id === chatId ? "active" : ""}" data-chat="${esc(item.id)}" title="${esc(item.title)}">
+            <span class="chat-item-title">${esc(item.title)}</span>
+            <span class="chat-item-date">${esc(chatDate(item.updated_at))}</span></button>`,
+        )
+        .join("");
+    }
+
+    function renderHead() {
+      const title = chat ? chat.title : "Новый чат";
+      const pill =
+        meta && meta.api_configured
+          ? `<span class="pill" title="Провайдер и модель из настроек">${esc(meta.provider_label)} · ${esc(meta.model)}</span>`
+          : "";
+      head.innerHTML = `<div class="chat-head-main"><h1 class="chat-title">${esc(title)}</h1>${pill}</div>
+        ${chat ? `<button type="button" class="icon-btn" id="chat-menu" aria-label="Действия с чатом">${icon("more")}</button>` : ""}`;
+    }
+
+    function renderNote() {
+      note.textContent =
+        configured() && meta
+          ? `Сообщения отправляются в ${meta.provider_label} по API-ключу. Ответы модели могут содержать ошибки.`
+          : "";
+    }
+
+    function updateComposer() {
+      const ready = configured();
+      input.disabled = !ready;
+      input.placeholder = ready ? "Напиши сообщение…" : "Добавь API-ключ в настройках, чтобы начать";
+      sendButton.classList.toggle("stop", running);
+      sendButton.innerHTML = icon(running ? "stop" : "send");
+      sendButton.setAttribute("aria-label", running ? "Остановить ответ" : "Отправить");
+      sendButton.title = running ? "Остановить ответ" : "Отправить (Enter)";
+      sendButton.disabled = running ? false : !ready || !input.value.trim();
+    }
+
+    function autosize() {
+      input.style.height = "auto";
+      input.style.height = `${Math.min(input.scrollHeight, 220)}px`;
+    }
+
+    function welcomeHtml() {
+      const ready = configured();
+      return `<div class="chat-welcome">
+        <div class="empty-art">${icon("chat")}</div>
+        <h2 class="empty-title">Чем помочь?</h2>
+        <p class="empty-text">Спроси что угодно: объясни тему, разбери задачу или составь план повторения.</p>
+        ${
+          ready
+            ? `<div class="chat-suggestions">${CHAT_SUGGESTIONS.map(
+                (text) => `<button type="button" class="chat-suggestion" data-suggest="${esc(text)}">${esc(text)}</button>`,
+              ).join("")}</div>`
+            : `<div class="notice notice-info chat-setup">${icon("key")}<div>Чат работает через API-ключ OpenAI, DeepSeek или Claude. Добавь ключ и модель в настройках.</div>
+                <button type="button" class="btn btn-sm btn-primary" data-go="#/settings">Открыть настройки</button></div>`
+        }
+      </div>`;
+    }
+
+    function messageHtml(message, isLast) {
+      const copy = `<button type="button" class="icon-btn" data-copy="${esc(message.id)}" aria-label="Копировать" title="Копировать">${icon("copy", "icon-sm")}</button>`;
+      if (message.role === "user") {
+        return `<div class="msg msg-user"><div class="msg-bubble">${esc(message.content)}</div>
+          <div class="msg-actions">${copy}</div></div>`;
+      }
+      const retry =
+        isLast && !running
+          ? `<button type="button" class="icon-btn" data-chat-retry aria-label="Ответить заново" title="Ответить заново">${icon("refresh", "icon-sm")}</button>`
+          : "";
+      return `<div class="msg msg-assistant ${isLast ? "last" : ""}">
+        <div class="msg-body prose">${message.html}</div>
+        ${message.stopped ? `<div class="msg-flag">${icon("stop", "icon-sm")}Ответ остановлен</div>` : ""}
+        <div class="msg-actions">${copy}${retry}${message.model ? `<span class="msg-model">${esc(message.model)}</span>` : ""}</div></div>`;
+    }
+
+    const streamHtml = () => `<div class="msg msg-assistant streaming" id="chat-stream">
+      <div class="msg-body prose"></div><div class="msg-typing"><span class="typing"><i></i><i></i><i></i></span></div></div>`;
+
+    function renderThread() {
+      if (!chat) {
+        thread.innerHTML = welcomeHtml();
+        return;
+      }
+      const messages = chat.messages;
+      let html = messages.map((message, index) => messageHtml(message, index === messages.length - 1)).join("");
+      const last = messages[messages.length - 1];
+      if (running) html += streamHtml();
+      else if (error) {
+        html += `<div class="notice notice-danger chat-error">${icon("alert")}<div class="chat-error-text">${esc(error)}</div>
+          <button type="button" class="btn btn-sm" data-chat-retry>${icon("refresh", "icon-sm")}Повторить</button></div>`;
+      } else if (last && last.role === "user") {
+        html += `<div class="chat-missing"><span class="faint small">Ответа на это сообщение нет.</span>
+          <button type="button" class="btn btn-sm btn-ghost" data-chat-retry>${icon("refresh", "icon-sm")}Получить ответ</button></div>`;
+      }
+      thread.innerHTML = html;
+    }
+
+    function applyChat(data) {
+      chat = data;
+      chatId = data.id;
+      running = Boolean(data.running);
+      error = data.error || "";
+      renderHead();
+      renderThread();
+      renderList();
+      updateComposer();
+      scrollToBottom();
+      if (running) follow(data.id);
+    }
+
+    async function openChat(id) {
+      pollToken += 1;
+      const token = ++loadToken;
+      chatId = id || null;
+      chat = null;
+      running = false;
+      error = "";
+      renderList();
+      renderHead();
+      updateComposer();
+      if (!chatId) {
+        renderThread();
+        input.focus();
+        return;
+      }
+      thread.innerHTML = `<div class="state-panel"><span class="spinner spinner-lg"></span></div>`;
+      try {
+        const data = await api("chat_get", chatId);
+        if (!alive || token !== loadToken) return;
+        applyChat(data);
+        input.focus();
+      } catch (err) {
+        if (!alive || token !== loadToken) return;
+        thread.innerHTML = `<div class="notice notice-danger">${icon("alert")}<div>${esc(err.message)}</div></div>`;
+      }
+    }
+
+    async function follow(id) {
+      const token = ++pollToken;
+      let seen = 0;
+      while (alive && token === pollToken) {
+        let result;
+        try {
+          result = await api("chat_poll", id, seen);
+        } catch (err) {
+          if (!alive || token !== pollToken) return;
+          running = false;
+          error = err.message;
+          renderThread();
+          updateComposer();
+          return;
+        }
+        if (!alive || token !== pollToken) return;
+        if (result.running) {
+          seen = result.length;
+          const body = $("#chat-stream .msg-body", thread);
+          if (body) {
+            const stick = nearBottom();
+            body.innerHTML = result.html;
+            if (stick) scrollToBottom();
+          }
+          await sleep(60);
+          continue;
+        }
+        const stick = nearBottom();
+        chat = result.chat;
+        running = false;
+        error = result.error || "";
+        renderThread();
+        updateComposer();
+        if (stick) scrollToBottom();
+        loadMeta();
+        return;
+      }
+    }
+
+    async function send() {
+      const text = input.value.trim();
+      if (!text || running || !configured()) return;
+      if (!chat) thread.innerHTML = "";
+      thread.querySelectorAll(".chat-error, .chat-missing").forEach((node) => node.remove());
+      thread.insertAdjacentHTML(
+        "beforeend",
+        `<div class="msg msg-user pending"><div class="msg-bubble">${esc(text)}</div></div>${streamHtml()}`,
+      );
+      scrollToBottom();
+      input.value = "";
+      autosize();
+      running = true;
+      updateComposer();
+      let data;
+      try {
+        data = await api("chat_send", chatId, text);
+      } catch (err) {
+        if (!alive) return;
+        running = false;
+        renderThread();
+        input.value = text;
+        autosize();
+        updateComposer();
+        toast(err.message, { type: "error" });
+        return;
+      }
+      if (!alive) return;
+      if (chatId !== data.id) {
+        history.replaceState(null, "", `#/chat/${data.id}`);
+        S.route = { name: "chat", id: data.id };
+      }
+      applyChat(data);
+      loadMeta();
+    }
+
+    async function stop() {
+      if (!running || !chatId) return;
+      sendButton.disabled = true;
+      await attempt(api("chat_stop", chatId));
+    }
+
+    async function retry() {
+      if (!chat || running) return;
+      const data = await attempt(api("chat_retry", chat.id));
+      if (data && alive) applyChat(data);
+    }
+
+    function renameChat() {
+      if (!chat) return;
+      const entry = openModal(
+        `${modalHead("Переименовать чат")}
+        <div class="modal-body"><div class="field" style="margin:0">
+          <input class="input input-lg" id="chat-rename-input" type="text" maxlength="120" value="${esc(chat.title)}" autofocus>
+        </div></div>
+        <div class="modal-foot">
+          <button type="button" class="btn" data-close>Отмена</button>
+          <button type="button" class="btn btn-primary" id="chat-rename-save">Сохранить</button>
+        </div>`,
+        { size: "modal-small" },
+      );
+      const field = $("#chat-rename-input", entry.modal);
+      setTimeout(() => field.select(), 40);
+      const save = async () => {
+        const title = field.value.trim();
+        if (!title) return;
+        const result = await attempt(api("chat_rename", chat.id, title));
+        if (!result) return;
+        entry.close();
+        if (chat && chat.id === result.id) chat.title = result.title;
+        renderHead();
+        loadMeta();
+      };
+      $("#chat-rename-save", entry.modal).addEventListener("click", save);
+      field.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") save();
+      });
+    }
+
+    async function deleteChat() {
+      if (!chat) return;
+      const ok = await confirmDialog({
+        title: "Удалить чат?",
+        text: `«${chat.title}» и вся переписка в нём будут удалены без возможности восстановления.`,
+        confirm: "Удалить",
+        danger: true,
+      });
+      if (!ok || !chat) return;
+      const result = await attempt(api("chat_delete", chat.id), false);
+      if (result === false) return;
+      toast("Чат удалён", { type: "success" });
+      if (location.hash === "#/chat") openChat(null);
+      else location.hash = "#/chat";
+      loadMeta();
+    }
+
+    list.addEventListener("click", (event) => {
+      const item = event.target.closest("[data-chat]");
+      if (item && item.dataset.chat !== chatId) location.hash = `#/chat/${item.dataset.chat}`;
+    });
+    $("#chat-new", root).addEventListener("click", () => {
+      if (location.hash === "#/chat") openChat(null);
+      else location.hash = "#/chat";
+    });
+    head.addEventListener("click", (event) => {
+      const button = event.target.closest("#chat-menu");
+      if (!button) return;
+      openMenu(button, [
+        { label: "Переименовать", icon: "edit", run: renameChat },
+        "-",
+        { label: "Удалить чат", icon: "trash", danger: true, run: deleteChat },
+      ]);
+    });
+    thread.addEventListener("click", async (event) => {
+      const suggestion = event.target.closest("[data-suggest]");
+      if (suggestion) {
+        input.value = suggestion.dataset.suggest;
+        autosize();
+        updateComposer();
+        input.focus();
+        return;
+      }
+      if (event.target.closest("[data-chat-retry]")) {
+        retry();
+        return;
+      }
+      const copy = event.target.closest("[data-copy]");
+      if (copy && chat) {
+        const message = chat.messages.find((item) => item.id === copy.dataset.copy);
+        if (message) {
+          const ok = await copyText(message.content);
+          toast(ok ? "Скопировано" : "Не удалось скопировать", { type: ok ? "success" : "error", timeout: 2000 });
+        }
+      }
+    });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (running) stop();
+      else send();
+    });
+    input.addEventListener("input", () => {
+      autosize();
+      updateComposer();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      if (!running) send();
+    });
+
+    if (meta) renderList();
+    renderNote();
+    openChat(chatId);
+    loadMeta();
+
+    return {
+      update(next) {
+        const id = next.id || null;
+        if (id !== chatId) openChat(id);
+        return true;
+      },
+      leave() {
+        alive = false;
+        pollToken += 1;
+      },
+    };
+  }
+
   // ============================================================== settings
   function SettingsView(root) {
     root.innerHTML = `<div class="page"><div class="page-inner" style="max-width:820px">
@@ -2558,7 +3004,7 @@
             <div class="setting-control" id="account-control"><span class="spinner"></span></div></div>
           <div class="setting"><div><div class="setting-title">Модель ChatGPT</div><div class="setting-hint">Например, gpt-5.5. Оставь как есть, если не уверен.</div></div>
             <div class="setting-control"><input class="input" id="s-chatgpt-model" value="${esc(settings.chatgpt_model)}" spellcheck="false"></div></div>
-          <div class="setting"><div><div class="setting-title">API-провайдер</div><div class="setting-hint">Для генерации по API-ключу.</div></div>
+          <div class="setting"><div><div class="setting-title">API-провайдер</div><div class="setting-hint">Для конспектов и чата по API-ключу.</div></div>
             <div class="setting-control"><select class="select" id="s-provider">${o.providers
               .map((p) => `<option value="${p.id}" ${p.id === settings.api_provider ? "selected" : ""}>${esc(p.label)}</option>`)
               .join("")}</select></div></div>

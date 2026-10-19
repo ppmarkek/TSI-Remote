@@ -9,6 +9,7 @@ description = "A local Windows app that turns BBB lecture recordings into struct
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic>=1.15.0",
     "imageio-ffmpeg>=0.5.0",
     "keyring>=24.0.0",
     "pillow>=10.0.0",

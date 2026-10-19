@@ -17,7 +17,19 @@ from .platform_services import KeyringSecretStore, SecretStore, SecretStoreError
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_CHATGPT_MODEL = "gpt-5.5"
-SUPPORTED_PROVIDERS = ("openai", "deepseek")
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+SUPPORTED_PROVIDERS = ("openai", "deepseek", "claude")
+PROVIDER_LABELS = {"openai": "OpenAI", "deepseek": "DeepSeek", "claude": "Claude"}
+_PROVIDER_DEFAULT_MODELS = {
+    "openai": DEFAULT_OPENAI_MODEL,
+    "deepseek": DEFAULT_DEEPSEEK_MODEL,
+    "claude": DEFAULT_CLAUDE_MODEL,
+}
+_PROVIDER_KEY_VARIABLES = {
+    "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+}
 SUPPORTED_WHISPER_MODELS = ("tiny", "base", "small")
 SUPPORTED_FRAME_INTERVALS = (30, 60, 90)
 SERVICE_NAME = "Konspekt"
@@ -46,7 +58,7 @@ class AppSettings:
 
     @property
     def provider_label(self) -> str:
-        return "OpenAI" if self.api_provider == "openai" else "DeepSeek"
+        return PROVIDER_LABELS.get(self.api_provider, "OpenAI")
 
 
 def default_settings_path() -> Path:
@@ -54,7 +66,7 @@ def default_settings_path() -> Path:
 
 
 def default_model_for_provider(provider: str) -> str:
-    return DEFAULT_DEEPSEEK_MODEL if provider == "deepseek" else DEFAULT_OPENAI_MODEL
+    return _PROVIDER_DEFAULT_MODELS.get(provider, DEFAULT_OPENAI_MODEL)
 
 
 def load_settings(
@@ -217,7 +229,7 @@ def _validated(settings: AppSettings) -> AppSettings:
 def _with_environment_key(settings: AppSettings) -> AppSettings:
     if settings.api_key:
         return settings
-    variable = "OPENAI_API_KEY" if settings.api_provider == "openai" else "DEEPSEEK_API_KEY"
+    variable = _PROVIDER_KEY_VARIABLES.get(settings.api_provider, "OPENAI_API_KEY")
     environment_key = os.environ.get(variable, "").strip()
     if not environment_key:
         return settings

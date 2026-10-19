@@ -70,6 +70,7 @@ _FORBIDDEN_IDENTIFIER_PATTERN = re.compile(
 PROVIDER_CONTEXT_LIMITS: dict[str, dict[str, int]] = {
     "openai": {"max_chars": 400_000, "max_bytes": 1_000_000},
     "deepseek": {"max_chars": 250_000, "max_bytes": 600_000},
+    "claude": {"max_chars": 600_000, "max_bytes": 1_500_000},
     "chatgpt": {"max_chars": 400_000, "max_bytes": 1_000_000},
     "deepseek_web": {"max_chars": 200_000, "max_bytes": 500_000},
 }

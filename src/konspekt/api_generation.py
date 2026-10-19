@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 import requests
 
 from .bbb_import import BBBRecording
+from .claude_api import ClaudeApiError, stream_claude_text
 from .job_runner import CancellationToken, JobCancelledError
 from .lesson_output import SavedLesson, save_generated_lesson
 from .local_pipeline import default_lecture_directory
@@ -21,6 +23,11 @@ from .outbound_context import (
 from .settings import AppSettings
 
 ProgressCallback = Callable[[int, str], None]
+
+_LESSON_INSTRUCTIONS = (
+    "Создай точный учебный конспект. Верни только готовый Markdown "
+    "и не добавляй факты, которых нет в контексте."
+)
 
 
 class ApiGenerationError(RuntimeError):
@@ -79,6 +86,16 @@ def generate_lesson_via_api(
 
     notify = progress or _do_nothing
     notify(8, "Проверяем локальный текстовый пакет…")
+    if settings.api_provider == "claude":
+        return _generate_with_claude(
+            recording,
+            settings,
+            prompt,
+            context,
+            target=target,
+            notify=notify,
+            cancellation_token=cancellation_token,
+        )
     if settings.api_provider == "openai":
         endpoint = "https://api.openai.com/v1/responses"
         payload = _openai_payload(settings.api_model, prompt, context)
@@ -163,6 +180,64 @@ def generate_lesson_via_api(
                 close_client()
 
 
+def _generate_with_claude(
+    recording: BBBRecording,
+    settings: AppSettings,
+    prompt: str,
+    context: str,
+    *,
+    target: Path,
+    notify: ProgressCallback,
+    cancellation_token: CancellationToken | None,
+) -> ApiLessonResult:
+    notify(24, f"Отправляем только текстовый контекст в {settings.provider_label}…")
+    received = 0
+    last_update = 0.0
+
+    def on_text(delta: str) -> None:
+        nonlocal received, last_update
+        received += len(delta)
+        now = time.monotonic()
+        if now - last_update < 0.5:
+            return
+        last_update = now
+        percent = min(86, 30 + received // 400)
+        count = f"{received:,}".replace(",", " ")
+        notify(percent, f"Claude пишет конспект… {count} символов")
+
+    try:
+        reply = stream_claude_text(
+            settings.api_key,
+            settings.api_model,
+            [{"role": "user", "content": f"{prompt}\n\n{context}"}],
+            system=_LESSON_INSTRUCTIONS,
+            effort="high",
+            on_text=on_text,
+            cancellation_token=cancellation_token,
+        )
+    except ClaudeApiError as exc:
+        raise ApiGenerationError(f"{exc} Локальные материалы сохранены.") from exc
+
+    notify(88, "Ответ получен. Проверяем и сохраняем конспект…")
+    if reply.stop_reason == "max_tokens":
+        raise ApiGenerationError(
+            "Конспект не поместился в один ответ Claude. Локальные материалы не изменены."
+        )
+    markdown = _clean_markdown(reply.text)
+    if not markdown:
+        raise ApiGenerationError("API вернул пустой ответ. Локальные материалы не изменены.")
+    if cancellation_token is not None:
+        cancellation_token.check_cancelled()
+
+    saved = save_generated_lesson(recording, markdown, directory=target)
+    notify(100, "Конспект создан и сохранён локально.")
+    return ApiLessonResult(
+        saved_lesson=saved,
+        provider=settings.provider_label,
+        model=settings.api_model,
+    )
+
+
 def _openai_payload(model: str, prompt: str, context: str) -> dict[str, Any]:
     return {
         "model": model,
@@ -179,13 +254,7 @@ def _deepseek_payload(model: str, prompt: str, context: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Создай точный учебный конспект. Верни только готовый Markdown "
-                    "и не добавляй факты, которых нет в контексте."
-                ),
-            },
+            {"role": "system", "content": _LESSON_INSTRUCTIONS},
             {"role": "user", "content": f"{prompt}\n\n{context}"},
         ],
         "stream": False,

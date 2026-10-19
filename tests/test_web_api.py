@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from konspekt.bbb_import import BBBRecording
+from konspekt.chat import ChatReply
 from konspekt.library_manager import save_to_library
+from konspekt.settings import AppSettings
 from konspekt.web.api import KonspektApi, UserFacingError, lecture_key
 
 LESSON = """# Структуры данных
@@ -169,6 +171,64 @@ class KonspektApiTests(unittest.TestCase):
         self.assertEqual(
             result, {"ok": False, "error": "Лекция не найдена. Возможно, её уже удалили."}
         )
+
+    def test_settings_offer_claude_as_a_provider(self) -> None:
+        options = self.call("get_settings")["options"]
+
+        self.assertIn({"id": "claude", "label": "Claude"}, options["providers"])
+        self.assertEqual(options["default_models"]["claude"], "claude-opus-5-5")
+
+    def test_chat_round_trip_through_the_bridge(self) -> None:
+        def streamer(settings, history, *, on_text, cancellation_token):
+            on_text("Стек — это ")
+            on_text("**LIFO**.")
+            return ChatReply(text="Стек — это **LIFO**.", model=settings.api_model)
+
+        api = KonspektApi(
+            data_dir=self.data_dir,
+            settings_path=self.data_dir / "settings.json",
+            open_url=self.opened.append,
+            reveal_path=lambda path: None,
+            chat_streamer=streamer,
+        )
+        self.addCleanup(api._shutdown)
+        api._settings_cache = AppSettings(
+            api_provider="claude", api_model="claude-opus-5-5", api_key="sk-ant-test"
+        )
+        self.api = api
+
+        meta = self.call("chat_list")
+        self.assertEqual(meta["chats"], [])
+        self.assertTrue(meta["api_configured"])
+        self.assertEqual((meta["provider_label"], meta["model"]), ("Claude", "claude-opus-5-5"))
+
+        chat = self.call("chat_send", None, "Что такое стек?")
+        result = self.call("chat_poll", chat["id"], 0)
+        while result["running"]:
+            result = self.call("chat_poll", chat["id"], result["length"])
+
+        messages = result["chat"]["messages"]
+        self.assertEqual([m["role"] for m in messages], ["user", "assistant"])
+        self.assertIn("<strong>LIFO</strong>", messages[1]["html"])
+        self.assertEqual(self.call("chat_list")["chats"][0]["title"], "Что такое стек?")
+
+        renamed = self.call("chat_rename", chat["id"], "Стек")
+        self.assertEqual(renamed["title"], "Стек")
+        self.assertEqual(self.call("chat_get", chat["id"])["title"], "Стек")
+
+        self.call("chat_delete", chat["id"])
+        self.assertEqual(self.call("chat_list")["chats"], [])
+        failed = api.chat_get(chat["id"])
+        self.assertFalse(failed["ok"])
+        self.assertIn("не найден", failed["error"])
+
+    def test_chat_without_api_key_explains_what_to_do(self) -> None:
+        self.api._settings_cache = AppSettings(api_key="")
+
+        result = self.api.chat_send(None, "Привет")
+
+        self.assertFalse(result["ok"])
+        self.assertIn("API-ключ", result["error"])
 
 
 if __name__ == "__main__":

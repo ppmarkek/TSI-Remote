@@ -4,11 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import requests
 
 from konspekt.api_generation import ApiGenerationError, generate_lesson_via_api
 from konspekt.bbb_import import BBBRecording
+from konspekt.claude_api import ClaudeApiError, ClaudeReply
 from konspekt.settings import AppSettings
 
 
@@ -250,6 +252,62 @@ class ApiGenerationTests(unittest.TestCase):
                     directory=directory,
                     cancellation_token=token,
                 )
+
+    def test_claude_streams_the_lesson_through_the_sdk(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def fake_stream(api_key, model, messages, **kwargs):
+            calls.append({"api_key": api_key, "model": model, "messages": messages, **kwargs})
+            kwargs["on_text"]("# Claude")
+            return ClaudeReply(text="```markdown\n# Claude lesson\n```", model=model, stop_reason="end_turn")
+
+        settings = AppSettings(
+            api_provider="claude", api_model="claude-opus-5-5", api_key="sk-ant-test"
+        )
+        progress_updates: list[tuple[int, str]] = []
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "konspekt.api_generation.stream_claude_text", fake_stream
+        ):
+            directory = Path(temporary)
+            self._write_context(directory)
+            result = generate_lesson_via_api(
+                self.recording,
+                settings,
+                directory=directory,
+                progress=lambda percent, message: progress_updates.append((percent, message)),
+            )
+            lesson = result.saved_lesson.path.read_text(encoding="utf-8")
+
+        self.assertEqual(lesson, "# Claude lesson\n")
+        self.assertEqual((result.provider, result.model), ("Claude", "claude-opus-5-5"))
+        self.assertEqual(progress_updates[-1][0], 100)
+        call = calls[0]
+        self.assertEqual(call["api_key"], "sk-ant-test")
+        self.assertEqual(call["effort"], "high")
+        self.assertIn("Markdown", call["system"])
+        self.assertEqual(call["messages"][0]["role"], "user")
+        self.assertIn("Useful local material", call["messages"][0]["content"])
+        self.assertNotIn("meeting-api", call["messages"][0]["content"])
+
+    def test_claude_errors_become_generation_errors(self) -> None:
+        settings = AppSettings(
+            api_provider="claude", api_model="claude-opus-5-5", api_key="sk-ant-test"
+        )
+
+        def failing(*args, **kwargs):
+            raise ClaudeApiError("API-ключ Claude не принят.")
+
+        def truncated(api_key, model, messages, **kwargs):
+            return ClaudeReply(text="# Начало", model=model, stop_reason="max_tokens")
+
+        for fake, expected in ((failing, "не принят"), (truncated, "не поместился")):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                self._write_context(directory)
+                with mock.patch("konspekt.api_generation.stream_claude_text", fake):
+                    with self.assertRaisesRegex(ApiGenerationError, expected):
+                        generate_lesson_via_api(self.recording, settings, directory=directory)
+                self.assertFalse((directory / "lesson.md").exists())
 
 
 if __name__ == "__main__":

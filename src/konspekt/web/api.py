@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 
 from .. import __version__
 from ..bbb_import import BBBRecording
+from ..chat import ChatService, ChatStore, ChatStreamer, stream_chat_reply
 from ..diagnostics import record_exception
 from ..job_runner import CancellationToken
 from ..library_manager import (
@@ -43,6 +44,7 @@ from ..library_manager import (
 from ..markdown_html import render_inline, render_markdown, strip_inline_markdown
 from ..outbound_context import OutboundContextError, validate_provider_context_limits
 from ..settings import (
+    PROVIDER_LABELS,
     SUPPORTED_FRAME_INTERVALS,
     SUPPORTED_PROVIDERS,
     SUPPORTED_WHISPER_MODELS,
@@ -103,6 +105,7 @@ class KonspektApi:
         open_url: Callable[[str], Any] = webbrowser.open_new_tab,
         reveal_path: Callable[[Path], None] | None = None,
         startup_warning: str = "",
+        chat_streamer: ChatStreamer = stream_chat_reply,
     ) -> None:
         if data_dir is None:
             from ..platform_services import PlatformAppPaths
@@ -115,6 +118,9 @@ class KonspektApi:
         self._reveal = reveal_path or _reveal_in_file_manager
         self._startup_warning = startup_warning
         self._study = StudyStore(data_dir / "study.json")
+        self._chat = ChatService(
+            ChatStore(data_dir / "chats.json"), self._settings, streamer=chat_streamer
+        )
         self._window: Any = None
         self._chrome_handler: Callable[[bool], None] | None = None
         self._lock = threading.RLock()
@@ -138,6 +144,7 @@ class KonspektApi:
         self._chrome_handler = handler
 
     def _shutdown(self) -> None:
+        self._chat.shutdown()
         self._tasks.shutdown()
 
     def _has_active_tasks(self) -> bool:
@@ -935,6 +942,46 @@ class KonspektApi:
             raise UserFacingError("Файл больше не существует.")
         self._reveal(target)
 
+    # =================================================================== chat
+    @_bridge
+    def chat_list(self) -> dict[str, Any]:
+        settings = self._settings()
+        return {
+            "chats": self._chat.store.list_chats(),
+            "api_configured": settings.api_configured,
+            "provider_label": settings.provider_label,
+            "model": settings.api_model,
+        }
+
+    @_bridge
+    def chat_get(self, chat_id: str) -> dict[str, Any]:
+        return self._chat.chat_payload(str(chat_id))
+
+    @_bridge
+    def chat_send(self, chat_id: str | None, text: str) -> dict[str, Any]:
+        return self._chat.send(str(chat_id) if chat_id else None, str(text or ""))
+
+    @_bridge
+    def chat_poll(self, chat_id: str, seen: int = 0) -> dict[str, Any]:
+        return self._chat.poll(str(chat_id), int(seen or 0), _POLL_TIMEOUT)
+
+    @_bridge
+    def chat_stop(self, chat_id: str) -> None:
+        self._chat.stop(str(chat_id))
+
+    @_bridge
+    def chat_retry(self, chat_id: str) -> dict[str, Any]:
+        return self._chat.retry(str(chat_id))
+
+    @_bridge
+    def chat_rename(self, chat_id: str, title: str) -> dict[str, Any]:
+        chat = self._chat.store.rename(str(chat_id), str(title or ""))
+        return {"id": chat["id"], "title": chat["title"]}
+
+    @_bridge
+    def chat_delete(self, chat_id: str) -> None:
+        self._chat.delete(str(chat_id))
+
     # =============================================================== settings
     @_bridge
     def get_settings(self) -> dict[str, Any]:
@@ -1089,7 +1136,7 @@ def _settings_payload(settings: AppSettings) -> dict[str, Any]:
         "ocr_enabled": settings.ocr_enabled,
         "options": {
             "providers": [
-                {"id": provider, "label": "OpenAI" if provider == "openai" else "DeepSeek"}
+                {"id": provider, "label": PROVIDER_LABELS[provider]}
                 for provider in SUPPORTED_PROVIDERS
             ],
             "default_models": {

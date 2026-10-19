@@ -928,6 +928,13 @@ class StudyApp(tk.Tk):
             variable=self._settings_provider,
             command=self._settings_provider_changed,
         ).pack(side="left", padx=(16, 8), pady=4)
+        ttk.Radiobutton(
+            providers,
+            text="Claude",
+            value="claude",
+            variable=self._settings_provider,
+            command=self._settings_provider_changed,
+        ).pack(side="left", padx=(16, 8), pady=4)
 
         tk.Label(
             form,
@@ -2836,7 +2843,7 @@ class StudyApp(tk.Tk):
         else:
             api_title = "API · не настроен"
             api_description = (
-                "Добавь ключ OpenAI или DeepSeek в настройках, чтобы приложение "
+                "Добавь ключ OpenAI, DeepSeek или Claude в настройках, чтобы приложение "
                 "автоматически создавало и сохраняло готовый конспект."
             )
             api_action_text = "Настроить API"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from konspekt.settings import (
     DEFAULT_CHATGPT_MODEL,
     AppSettings,
     SettingsError,
+    default_model_for_provider,
     load_settings,
     save_settings,
 )
@@ -109,6 +111,37 @@ class SettingsTests(unittest.TestCase):
             path = Path(temporary) / "settings.json"
             with self.assertRaises(SettingsError):
                 save_settings(AppSettings(chatgpt_model="   "), path=path)
+
+    def test_claude_provider_round_trips_with_its_default_model(self) -> None:
+        store = MockSecretStore()
+        settings = AppSettings(
+            api_provider="claude",
+            api_model=default_model_for_provider("claude"),
+            api_key="sk-ant-test",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.json"
+            save_settings(settings, path=path, secret_store=store)
+            loaded = load_settings(path=path, secret_store=store)
+
+        self.assertEqual(loaded, settings)
+        self.assertEqual(loaded.api_model, "claude-opus-5-5")
+        self.assertEqual(loaded.provider_label, "Claude")
+        self.assertTrue(loaded.api_configured)
+
+    def test_claude_key_can_come_from_the_environment(self) -> None:
+        store = MockSecretStore()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.json"
+            save_settings(
+                AppSettings(api_provider="claude", api_model="claude-opus-5-5"),
+                path=path,
+                secret_store=store,
+            )
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-env"}):
+                loaded = load_settings(path=path, secret_store=store)
+
+        self.assertEqual(loaded.api_key, "sk-ant-env")
 
 
 if __name__ == "__main__":

@@ -26,11 +26,14 @@ def collect_shared_packaging_info(
     binaries: list[tuple[str, str]] = []
     hiddenimports: list[str] = [
         "konspekt",
+        "konspekt.chat",
+        "konspekt.claude_api",
         "konspekt.platform_services",
         "konspekt.web.api",
         "konspekt.web.main",
         "konspekt.web.server",
         "konspekt.web.tasks",
+        "anthropic",
         "keyring",
         "keyring.backends",
         "platformdirs",
@@ -86,6 +89,8 @@ def collect_shared_packaging_info(
         from PyInstaller.utils.hooks import collect_all, collect_data_files
 
         for package in (
+            # The SDK loads its resource modules lazily.
+            "anthropic",
             "imageio_ffmpeg",
             "faster_whisper",
             "ctranslate2",
