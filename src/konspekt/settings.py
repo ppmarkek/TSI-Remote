@@ -6,7 +6,8 @@ import base64
 import ctypes
 import json
 import os
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,22 +19,32 @@ DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_CHATGPT_MODEL = "gpt-5.5"
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
-SUPPORTED_PROVIDERS = ("openai", "deepseek", "claude")
-PROVIDER_LABELS = {"openai": "OpenAI", "deepseek": "DeepSeek", "claude": "Claude"}
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+SUPPORTED_PROVIDERS = ("openai", "deepseek", "claude", "gemini")
+PROVIDER_LABELS = {
+    "openai": "OpenAI",
+    "deepseek": "DeepSeek",
+    "claude": "Claude",
+    "gemini": "Gemini",
+}
 _PROVIDER_DEFAULT_MODELS = {
     "openai": DEFAULT_OPENAI_MODEL,
     "deepseek": DEFAULT_DEEPSEEK_MODEL,
     "claude": DEFAULT_CLAUDE_MODEL,
+    "gemini": DEFAULT_GEMINI_MODEL,
 }
 _PROVIDER_KEY_VARIABLES = {
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "claude": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
 }
 SUPPORTED_WHISPER_MODELS = ("tiny", "base", "small")
 SUPPORTED_FRAME_INTERVALS = (30, 60, 90)
 SERVICE_NAME = "Konspekt"
+# Version 0.2 kept a single key here, for whichever provider was chosen then.
 SECRET_ACCOUNT = "api_key"
+SCHEMA_VERSION = 2
 
 
 class SettingsError(RuntimeError):
@@ -42,7 +53,13 @@ class SettingsError(RuntimeError):
 
 @dataclass(frozen=True)
 class AppSettings:
-    """User-controlled processing and API preferences."""
+    """User-controlled processing and API preferences.
+
+    ``api_models`` and ``api_keys`` keep a model and a key for every provider.
+    ``api_provider`` is the default one, and ``api_model``/``api_key`` are its
+    values: they always win over its entries in the two mappings. Switch the
+    provider with :meth:`for_provider`, which carries the matching key along.
+    """
 
     api_provider: str = "openai"
     api_model: str = DEFAULT_OPENAI_MODEL
@@ -51,6 +68,23 @@ class AppSettings:
     whisper_model: str = "base"
     frame_interval_seconds: int = 60
     ocr_enabled: bool = True
+    api_models: Mapping[str, str] = field(default_factory=dict, hash=False)
+    api_keys: Mapping[str, str] = field(default_factory=dict, hash=False, repr=False)
+    # Providers whose key the keychain refused to give; saving leaves those keys alone.
+    unread_keys: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        models = {
+            provider: str(self.api_models.get(provider, "")).strip()
+            or default_model_for_provider(provider)
+            for provider in SUPPORTED_PROVIDERS
+        }
+        keys = {provider: str(self.api_keys.get(provider, "")) for provider in SUPPORTED_PROVIDERS}
+        if self.api_provider in models:
+            models[self.api_provider] = self.api_model
+            keys[self.api_provider] = self.api_key
+        object.__setattr__(self, "api_models", models)
+        object.__setattr__(self, "api_keys", keys)
 
     @property
     def api_configured(self) -> bool:
@@ -60,6 +94,42 @@ class AppSettings:
     def provider_label(self) -> str:
         return PROVIDER_LABELS.get(self.api_provider, "OpenAI")
 
+    def provider_configured(self, provider: str) -> bool:
+        return bool(
+            self.api_keys.get(provider, "").strip() and self.api_models.get(provider, "").strip()
+        )
+
+    @property
+    def configured_providers(self) -> tuple[str, ...]:
+        """Providers that have a key, the default one first."""
+
+        others = (provider for provider in SUPPORTED_PROVIDERS if provider != self.api_provider)
+        return tuple(
+            provider
+            for provider in (self.api_provider, *others)
+            if self.provider_configured(provider)
+        )
+
+    def for_provider(self, provider: str) -> AppSettings:
+        """These settings with ``provider`` as the API that requests go to."""
+
+        if provider not in SUPPORTED_PROVIDERS:
+            raise SettingsError("Выбран неизвестный API-провайдер.")
+        return replace(
+            self,
+            api_provider=provider,
+            api_model=self.api_models[provider],
+            api_key=self.api_keys[provider],
+        )
+
+    def preferred_api(self) -> AppSettings:
+        """The default provider, or the first one with a key when it has none."""
+
+        configured = self.configured_providers
+        if self.api_configured or not configured:
+            return self
+        return self.for_provider(configured[0])
+
 
 def default_settings_path() -> Path:
     return default_library_path().parent / "settings.json"
@@ -67,6 +137,12 @@ def default_settings_path() -> Path:
 
 def default_model_for_provider(provider: str) -> str:
     return _PROVIDER_DEFAULT_MODELS.get(provider, DEFAULT_OPENAI_MODEL)
+
+
+def secret_account(provider: str) -> str:
+    """The keyring account that holds the API key of ``provider``."""
+
+    return f"{SECRET_ACCOUNT}.{provider}"
 
 
 def load_settings(
@@ -95,7 +171,17 @@ def load_settings(
     if provider not in SUPPORTED_PROVIDERS:
         provider = "openai"
 
-    model = str(payload.get("api_model", "")).strip() or default_model_for_provider(provider)
+    stored_models = payload.get("api_models")
+    models = {
+        name: str(value).strip()
+        for name, value in (stored_models.items() if isinstance(stored_models, dict) else ())
+        if name in SUPPORTED_PROVIDERS
+    }
+    model = (
+        str(payload.get("api_model", "")).strip()
+        or models.get(provider, "")
+        or default_model_for_provider(provider)
+    )
     chatgpt_model = str(payload.get("chatgpt_model", "")).strip() or DEFAULT_CHATGPT_MODEL
     whisper_model = str(payload.get("whisper_model", "base")).strip().lower()
     if whisper_model not in SUPPORTED_WHISPER_MODELS:
@@ -109,7 +195,9 @@ def load_settings(
         frame_interval = 60
 
     store = secret_store or KeyringSecretStore()
-    api_key = ""
+    # A locked keychain is reported only to callers that passed their own store.
+    strict = secret_store is not None
+    keys = {name: "" for name in SUPPORTED_PROVIDERS}
 
     protected_key = str(payload.get("api_key_protected", "")).strip()
     if protected_key:
@@ -118,8 +206,8 @@ def load_settings(
         except SettingsError:
             decrypted = ""
         if decrypted:
-            api_key = decrypted
-            if _store_and_verify_secret(store, decrypted):
+            keys[provider] = decrypted
+            if _store_and_verify_secret(store, secret_account(provider), decrypted):
                 sanitized_payload = dict(payload)
                 sanitized_payload.pop("api_key_protected", None)
                 try:
@@ -134,25 +222,41 @@ def load_settings(
                     # legacy field merely causes another idempotent migration.
                     pass
 
-    if not api_key:
-        try:
-            retrieved = store.get_secret(SERVICE_NAME, SECRET_ACCOUNT)
-            if retrieved:
-                api_key = retrieved
-        except SecretStoreError as exc:
-            if secret_store is not None:
-                raise SettingsError(
-                    "Не удалось прочитать API-ключ из системного хранилища."
-                ) from exc
+    unread: set[str] = set()
+    for name in SUPPORTED_PROVIDERS:
+        if not keys[name]:
+            stored = _read_secret(store, secret_account(name))
+            if stored is None:
+                unread.add(name)
+            keys[name] = stored or ""
+
+    if not keys[provider]:
+        legacy_key = _read_secret(store, SECRET_ACCOUNT)
+        if legacy_key is None:
+            unread.add(provider)
+        elif legacy_key:
+            keys[provider] = legacy_key
+            unread.discard(provider)
+            if _store_and_verify_secret(store, secret_account(provider), legacy_key):
+                try:
+                    store.delete_secret(SERVICE_NAME, SECRET_ACCOUNT)
+                except SecretStoreError:
+                    # The next save removes it; until then the copies agree.
+                    pass
+    if strict and provider in unread:
+        raise SettingsError("Не удалось прочитать API-ключ из системного хранилища.")
 
     settings = AppSettings(
         api_provider=provider,
         api_model=model,
-        api_key=api_key,
+        api_key=keys[provider],
         chatgpt_model=chatgpt_model,
         whisper_model=whisper_model,
         frame_interval_seconds=frame_interval,
         ocr_enabled=bool(payload.get("ocr_enabled", True)),
+        api_models=models,
+        api_keys=keys,
+        unread_keys=frozenset(unread),
     )
     return _with_environment_key(settings)
 
@@ -162,22 +266,40 @@ def save_settings(
     path: Path | None = None,
     secret_store: SecretStore | None = None,
 ) -> Path:
-    """Atomically save preferences and store the API key in the platform keyring."""
+    """Atomically save preferences and store the API keys in the platform keyring."""
 
     validated = _validated(settings)
     settings_path = path or default_settings_path()
-    payload: dict[str, Any] = asdict(validated)
-    api_key = str(payload.pop("api_key", "")).strip()
-    payload.pop("api_key_protected", None)
-    payload["schema_version"] = 1
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "api_provider": validated.api_provider,
+        "api_model": validated.api_model,
+        "api_models": dict(validated.api_models),
+        "chatgpt_model": validated.chatgpt_model,
+        "whisper_model": validated.whisper_model,
+        "frame_interval_seconds": validated.frame_interval_seconds,
+        "ocr_enabled": validated.ocr_enabled,
+    }
 
     store = secret_store or KeyringSecretStore()
     try:
-        if api_key:
-            store.set_secret(SERVICE_NAME, SECRET_ACCOUNT, api_key)
-            if store.get_secret(SERVICE_NAME, SECRET_ACCOUNT) != api_key:
+        for provider, api_key in validated.api_keys.items():
+            from_environment = not api_key or api_key == _environment_key(provider)
+            if from_environment and provider in validated.unread_keys:
+                # Nothing typed in for a key that could not be read: keep what is stored.
+                continue
+            account = secret_account(provider)
+            if (store.get_secret(SERVICE_NAME, account) or "") == api_key:
+                continue
+            if from_environment:
+                # A key from an environment variable is read from there again.
+                store.delete_secret(SERVICE_NAME, account)
+                continue
+            store.set_secret(SERVICE_NAME, account, api_key)
+            if store.get_secret(SERVICE_NAME, account) != api_key:
                 raise SecretStoreError("Системное хранилище не подтвердило запись ключа.")
-        else:
+        # The key of version 0.2 now lives in its provider's own account.
+        if not validated.unread_keys:
             store.delete_secret(SERVICE_NAME, SECRET_ACCOUNT)
     except SecretStoreError as exc:
         raise SettingsError(
@@ -192,12 +314,21 @@ def save_settings(
     return settings_path
 
 
-def _store_and_verify_secret(store: SecretStore, secret: str) -> bool:
+def _store_and_verify_secret(store: SecretStore, account: str, secret: str) -> bool:
     try:
-        store.set_secret(SERVICE_NAME, SECRET_ACCOUNT, secret)
-        return store.get_secret(SERVICE_NAME, SECRET_ACCOUNT) == secret
+        store.set_secret(SERVICE_NAME, account, secret)
+        return store.get_secret(SERVICE_NAME, account) == secret
     except SecretStoreError:
         return False
+
+
+def _read_secret(store: SecretStore, account: str) -> str | None:
+    """The stored secret, "" when there is none, None when the store failed."""
+
+    try:
+        return store.get_secret(SERVICE_NAME, account) or ""
+    except SecretStoreError:
+        return None
 
 
 def _validated(settings: AppSettings) -> AppSettings:
@@ -223,24 +354,26 @@ def _validated(settings: AppSettings) -> AppSettings:
         whisper_model=whisper_model,
         frame_interval_seconds=settings.frame_interval_seconds,
         ocr_enabled=bool(settings.ocr_enabled),
+        api_models={name: value.strip() for name, value in settings.api_models.items()},
+        api_keys={name: value.strip() for name, value in settings.api_keys.items()},
+        unread_keys=settings.unread_keys,
     )
 
 
+def _environment_key(provider: str) -> str:
+    return os.environ.get(_PROVIDER_KEY_VARIABLES.get(provider, ""), "").strip()
+
+
 def _with_environment_key(settings: AppSettings) -> AppSettings:
-    if settings.api_key:
+    keys = {
+        provider: key or _environment_key(provider) for provider, key in settings.api_keys.items()
+    }
+    if keys == settings.api_keys:
         return settings
-    variable = _PROVIDER_KEY_VARIABLES.get(settings.api_provider, "OPENAI_API_KEY")
-    environment_key = os.environ.get(variable, "").strip()
-    if not environment_key:
-        return settings
-    return AppSettings(
-        api_provider=settings.api_provider,
-        api_model=settings.api_model,
-        api_key=environment_key,
-        chatgpt_model=settings.chatgpt_model,
-        whisper_model=settings.whisper_model,
-        frame_interval_seconds=settings.frame_interval_seconds,
-        ocr_enabled=settings.ocr_enabled,
+    return replace(
+        settings,
+        api_key=keys.get(settings.api_provider, settings.api_key),
+        api_keys=keys,
     )
 
 

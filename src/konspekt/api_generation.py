@@ -24,6 +24,11 @@ from .settings import AppSettings
 
 ProgressCallback = Callable[[int, str], None]
 
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
+# Gemini's OpenAI-compatible endpoint takes the same chat completion requests.
+GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+
 _LESSON_INSTRUCTIONS = (
     "Создай точный учебный конспект. Верни только готовый Markdown "
     "и не добавляй факты, которых нет в контексте."
@@ -97,11 +102,14 @@ def generate_lesson_via_api(
             cancellation_token=cancellation_token,
         )
     if settings.api_provider == "openai":
-        endpoint = "https://api.openai.com/v1/responses"
+        endpoint = OPENAI_RESPONSES_URL
         payload = _openai_payload(settings.api_model, prompt, context)
     elif settings.api_provider == "deepseek":
-        endpoint = "https://api.deepseek.com/chat/completions"
+        endpoint = DEEPSEEK_CHAT_URL
         payload = _deepseek_payload(settings.api_model, prompt, context)
+    elif settings.api_provider == "gemini":
+        endpoint = GEMINI_CHAT_URL
+        payload = _chat_completion_payload(settings.api_model, prompt, context)
     else:
         raise ApiGenerationError("Выбран неподдерживаемый API-провайдер.")
 
@@ -250,8 +258,8 @@ def _openai_payload(model: str, prompt: str, context: str) -> dict[str, Any]:
     }
 
 
-def _deepseek_payload(model: str, prompt: str, context: str) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+def _chat_completion_payload(model: str, prompt: str, context: str) -> dict[str, Any]:
+    return {
         "model": model,
         "messages": [
             {"role": "system", "content": _LESSON_INSTRUCTIONS},
@@ -259,6 +267,10 @@ def _deepseek_payload(model: str, prompt: str, context: str) -> dict[str, Any]:
         ],
         "stream": False,
     }
+
+
+def _deepseek_payload(model: str, prompt: str, context: str) -> dict[str, Any]:
+    payload = _chat_completion_payload(model, prompt, context)
     if model.startswith("deepseek-v4"):
         payload["thinking"] = {"type": "disabled"}
     return payload
@@ -279,11 +291,15 @@ def _response_json_or_empty(response: Any) -> dict[str, Any]:
         body = response.json()
     except (TypeError, ValueError):
         return {}
+    # Gemini wraps its error object in a one-element list.
+    if isinstance(body, list) and len(body) == 1:
+        body = body[0]
     return body if isinstance(body, dict) else {}
 
 
 def _http_error(status_code: int, body: dict[str, Any]) -> ApiGenerationError:
-    if status_code in {401, 403}:
+    # Gemini answers 400 with reason API_KEY_INVALID for a wrong key.
+    if status_code in {401, 403} or "API_KEY_INVALID" in str(body):
         return ApiGenerationError("API-ключ не принят. Проверь ключ в настройках.")
     if status_code == 429:
         return ApiGenerationError(
@@ -325,6 +341,8 @@ def _openai_output_text(body: dict[str, Any]) -> str:
 
 
 def _deepseek_output_text(body: dict[str, Any]) -> str:
+    """The answer of a chat completion (DeepSeek and Gemini)."""
+
     choices = body.get("choices", [])
     if not isinstance(choices, list) or not choices:
         return ""

@@ -198,6 +198,34 @@ class ProviderStreamingTests(unittest.TestCase):
         self.assertEqual(payload["messages"][0]["role"], "system")
         self.assertEqual(payload["thinking"], {"type": "disabled"})
 
+    def test_gemini_streams_through_its_openai_compatible_endpoint(self) -> None:
+        lines = [
+            "data: " + json.dumps({"choices": [{"delta": {"content": "Ст"}}]}),
+            "data: " + json.dumps({"choices": [{"delta": {"content": "ек"}}]}),
+            "data: [DONE]",
+        ]
+        session = FakeSession(FakeStreamResponse(200, lines))
+        settings = AppSettings(
+            api_provider="gemini", api_model="gemini-3.8-flash", api_key="AIza-test"
+        )
+
+        reply = stream_chat_reply(
+            settings,
+            [{"role": "user", "content": "Вопрос"}],
+            on_text=lambda _: None,
+            cancellation_token=CancellationToken(),
+            session=session,
+        )
+
+        self.assertEqual(reply, ChatReply(text="Стек", model="gemini-3.8-flash"))
+        call = session.calls[0]
+        self.assertEqual(
+            call["url"],
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        )
+        self.assertTrue(call["json"]["stream"])
+        self.assertNotIn("thinking", call["json"])
+
     def test_http_errors_are_reported_to_the_user(self) -> None:
         session = FakeSession(FakeStreamResponse(401, []))
         settings = AppSettings(api_provider="openai", api_model="gpt-test", api_key="sk-bad")

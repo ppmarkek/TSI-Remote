@@ -15,7 +15,14 @@ from typing import Any
 
 import requests
 
-from .api_generation import ApiGenerationError, _http_error, _response_json_or_empty
+from .api_generation import (
+    DEEPSEEK_CHAT_URL,
+    GEMINI_CHAT_URL,
+    OPENAI_RESPONSES_URL,
+    ApiGenerationError,
+    _http_error,
+    _response_json_or_empty,
+)
 from .atomic_io import AtomicIOError, atomic_write_text
 from .claude_api import ClaudeApiError, stream_claude_text
 from .diagnostics import record_exception
@@ -280,7 +287,7 @@ def stream_chat_reply(
         return ChatReply(text=reply.text, model=reply.model)
 
     if settings.api_provider == "openai":
-        endpoint = "https://api.openai.com/v1/responses"
+        endpoint = OPENAI_RESPONSES_URL
         payload: dict[str, Any] = {
             "model": settings.api_model,
             "instructions": CHAT_SYSTEM_PROMPT,
@@ -289,8 +296,8 @@ def stream_chat_reply(
             "stream": True,
         }
         read_delta = _openai_delta
-    elif settings.api_provider == "deepseek":
-        endpoint = "https://api.deepseek.com/chat/completions"
+    elif settings.api_provider in {"deepseek", "gemini"}:
+        endpoint = DEEPSEEK_CHAT_URL if settings.api_provider == "deepseek" else GEMINI_CHAT_URL
         payload = {
             "model": settings.api_model,
             "messages": [{"role": "system", "content": CHAT_SYSTEM_PROMPT}, *messages],

@@ -4,12 +4,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from konspekt.bbb_import import BBBRecording
 from konspekt.chat import ChatReply
+from konspekt.job_runner import CancellationToken
 from konspekt.library_manager import save_to_library
 from konspekt.settings import AppSettings
-from konspekt.web.api import KonspektApi, UserFacingError, lecture_key
+from konspekt.web.api import KonspektApi, UserFacingError, _follow_up, lecture_key
+from konspekt.web.tasks import Task
 
 LESSON = """# Структуры данных
 
@@ -177,6 +181,129 @@ class KonspektApiTests(unittest.TestCase):
 
         self.assertIn({"id": "claude", "label": "Claude"}, options["providers"])
         self.assertEqual(options["default_models"]["claude"], "claude-opus-5-5")
+
+    def _write_context(self) -> None:
+        (self.directory / "lesson-context.md").write_text("# Контекст\n\nСтек.\n", "utf-8")
+        (self.directory / "lesson-prompt.md").write_text("Сделай конспект.", "utf-8")
+
+    def test_every_api_with_a_key_is_a_generation_choice(self) -> None:
+        self._write_context()
+        self.api._settings_cache = AppSettings(
+            api_provider="openai",
+            api_key="sk-openai",
+            api_models={"gemini": "gemini-4-argon"},
+            api_keys={"claude": "sk-ant-test", "gemini": "AIza-test"},
+        )
+
+        choices = self.call("generate_options", self.key)["providers"]
+
+        self.assertEqual(
+            [(c["id"], c["label"], c["model"]) for c in choices],
+            [
+                ("chatgpt", "ChatGPT (твой аккаунт)", "gpt-5.5"),
+                ("api:openai", "API OpenAI", "gpt-5.6-luna"),
+                ("api:claude", "API Claude", "claude-opus-5-5"),
+                ("api:gemini", "API Gemini", "gemini-4-argon"),
+                ("manual", "Вручную через веб-чат", ""),
+            ],
+        )
+        self.assertTrue(all(c["configured"] for c in choices))
+
+    def test_without_api_keys_one_choice_points_to_the_settings(self) -> None:
+        self._write_context()
+        self.api._settings_cache = AppSettings()
+
+        choices = self.call("generate_options", self.key)["providers"]
+
+        self.assertEqual([c["id"] for c in choices], ["chatgpt", "api", "manual"])
+        self.assertFalse(choices[1]["configured"])
+        refused = self.api.generate(self.key, "api:gemini")
+        self.assertFalse(refused["ok"])
+        self.assertIn("API-ключ Gemini", refused["error"])
+        unknown = self.api.generate(self.key, "api:mistral")
+        self.assertIn("Выбери", unknown["error"])
+
+    def test_generation_uses_the_key_and_model_of_the_chosen_api(self) -> None:
+        self._write_context()
+        self.api._settings_cache = AppSettings(
+            api_provider="openai", api_key="sk-openai", api_keys={"gemini": "AIza-test"}
+        )
+        used: list[AppSettings] = []
+
+        def fake_generate(recording, settings, **kwargs):
+            used.append(settings)
+            return SimpleNamespace(provider=settings.provider_label, model=settings.api_model)
+
+        def run(provider: str, model: str = "") -> str:
+            task = Task(
+                task_id="t-1",
+                lecture_key=self.key,
+                kind="generate",
+                lane="generate",
+                title="Структуры данных",
+                params={"provider": provider, "model": model},
+            )
+            return self.api._run_generate(task, lambda *_: None, CancellationToken())
+
+        with mock.patch("konspekt.api_generation.generate_lesson_via_api", fake_generate):
+            gemini = run("api:gemini")
+            argon = run("api:gemini", "gemini-4-argon")
+            default = run("api")
+
+        self.assertEqual(gemini, "Конспект готов (Gemini, gemini-3.8-flash).")
+        self.assertEqual((used[0].api_provider, used[0].api_key), ("gemini", "AIza-test"))
+        self.assertEqual(argon, "Конспект готов (Gemini, gemini-4-argon).")
+        self.assertEqual((used[2].api_provider, used[2].api_key), ("openai", "sk-openai"))
+        self.assertIn("OpenAI", default)
+
+    def test_saving_settings_changes_only_the_keys_it_names(self) -> None:
+        self.api._settings_cache = AppSettings(
+            api_provider="openai", api_key="sk-openai", api_keys={"claude": "sk-ant-test"}
+        )
+        saved: list[AppSettings] = []
+
+        with mock.patch("konspekt.web.api.save_settings", lambda s, path: saved.append(s)):
+            self.call(
+                "save_settings",
+                {
+                    "api_provider": "gemini",
+                    "api_models": {"gemini": "gemini-4-argon"},
+                    "api_keys": {"gemini": " AIza-new ", "claude": ""},
+                },
+            )
+
+        updated = saved[0]
+        self.assertEqual(
+            (updated.api_provider, updated.api_model, updated.api_key),
+            ("gemini", "gemini-4-argon", "AIza-new"),
+        )
+        self.assertEqual(updated.api_keys["openai"], "sk-openai")
+        self.assertEqual(updated.api_keys["claude"], "")
+        self.assertEqual(updated.configured_providers, ("gemini", "openai"))
+
+    def test_settings_list_each_api_with_its_state(self) -> None:
+        self.api._settings_cache = AppSettings(api_provider="openai", api_keys={"gemini": "AIza"})
+
+        payload = self.call("get_settings")
+
+        providers = {p["id"]: p for p in payload["api_providers"]}
+        self.assertEqual(list(providers), ["openai", "deepseek", "claude", "gemini"])
+        self.assertTrue(providers["gemini"]["key_set"])
+        self.assertFalse(providers["claude"]["key_set"])
+        self.assertEqual(providers["gemini"]["default_model"], "gemini-3.8-flash")
+        self.assertEqual(payload["configured_providers"], ["gemini"])
+        # The chat falls back to the only API that has a key.
+        self.assertEqual(payload["chat_provider"], "gemini")
+        self.assertTrue(payload["api_configured"])
+        self.assertEqual(self.call("chat_list")["provider_label"], "Gemini")
+
+    def test_prepare_follow_up_accepts_a_named_api(self) -> None:
+        self.assertEqual(
+            _follow_up({"provider": "api:claude", "model": "claude-opus-5-5"}),
+            {"then_generate": {"provider": "api:claude", "model": "claude-opus-5-5"}},
+        )
+        self.assertEqual(_follow_up({"provider": "api:mistral"}), {})
+        self.assertEqual(_follow_up({"provider": "manual"}), {})
 
     def test_chat_round_trip_through_the_bridge(self) -> None:
         def streamer(settings, history, *, on_text, cancellation_token):

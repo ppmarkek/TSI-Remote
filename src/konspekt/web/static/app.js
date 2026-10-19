@@ -1016,10 +1016,10 @@
     let mode = initialMode === "file" ? "file" : "link";
     let filePath = "";
     const canChatGPT = Boolean(S.chatgpt && S.chatgpt.signed_in);
-    const apiReady = S.settings && S.settings.api_configured;
+    const apiLabels = Object.fromEntries(((S.settings && S.settings.api_providers) || []).map((p) => [p.id, p.label]));
     const generators = [
       canChatGPT ? { id: "chatgpt", label: "ChatGPT" } : null,
-      apiReady ? { id: "api", label: `API ${S.settings.provider_label}` } : null,
+      ...((S.settings && S.settings.configured_providers) || []).map((id) => ({ id: `api:${id}`, label: `API ${apiLabels[id] || id}` })),
     ].filter(Boolean);
 
     const entry = openModal(
@@ -1263,8 +1263,11 @@
     const chatgpt = S.chatgpt || (await loadChatGPTStatus());
     let selected = "manual";
     const provider = (id) => options.providers.find((item) => item.id === id);
+    // "api" when no key is set yet, otherwise one "api:<provider>" per key.
+    const isApi = (id) => id === "api" || id.startsWith("api:");
+    const readyApi = options.providers.find((item) => isApi(item.id) && item.configured && !item.limit_warning);
     if (chatgpt.signed_in && !provider("chatgpt").limit_warning) selected = "chatgpt";
-    else if (provider("api").configured && !provider("api").limit_warning) selected = "api";
+    else if (readyApi) selected = readyApi.id;
     let handoff = null;
 
     function providerDescription(item) {
@@ -1273,15 +1276,15 @@
         if (!chatgpt.signed_in) return "Войди в свой аккаунт ChatGPT — подписка Plus/Pro уже включает генерацию.";
         return `Аккаунт ${chatgpt.email || "ChatGPT"} · модель ${item.model}`;
       }
-      if (item.id === "api") {
-        return item.configured ? `Модель ${item.model}` : "Добавь API-ключ в настройках.";
+      if (isApi(item.id)) {
+        return item.configured ? `Модель ${item.model}` : "Добавь ключ OpenAI, Claude, Gemini или DeepSeek в настройках.";
       }
       return "Скопируешь задание в DeepSeek, ChatGPT или другой чат сам и вставишь ответ сюда.";
     }
 
     function providerReady(item) {
       if (item.id === "chatgpt") return chatgpt.available && chatgpt.signed_in;
-      if (item.id === "api") return item.configured;
+      if (isApi(item.id)) return item.configured;
       return true;
     }
 
@@ -1298,7 +1301,7 @@
               ${
                 item.id === "chatgpt" && chatgpt.available && !chatgpt.signed_in
                   ? `<button type="button" class="btn btn-sm" data-login>${icon("user", "icon-sm")}Войти</button>`
-                  : item.id === "api" && !item.configured
+                  : isApi(item.id) && !item.configured
                     ? `<button type="button" class="btn btn-sm" data-go-settings>Настройки</button>`
                     : ""
               }
@@ -2983,8 +2986,21 @@
         .join("")}</div>`;
     }
 
+    function apiRow(p) {
+      const sample = { claude: "sk-ant-…", gemini: "AIza…" }[p.id] || "sk-…";
+      return `<div class="setting" data-api="${p.id}"><div><div class="setting-title">API ${esc(p.label)}</div>
+          <div class="setting-hint">${p.key_set ? "Ключ сохранён" : "Нет ключа"}</div></div>
+        <div class="setting-control">
+          <input class="input input-model" data-api-model value="${esc(p.model)}" placeholder="${esc(p.default_model)}" spellcheck="false" title="Модель" aria-label="Модель ${esc(p.label)}">
+          <input class="input input-key" data-api-key type="password" autocomplete="off" spellcheck="false" aria-label="API-ключ ${esc(p.label)}"
+            placeholder="${p.key_set ? "Сохранён — введи новый" : sample}">
+          <button type="button" class="icon-btn" data-clear-key title="Удалить ключ" aria-label="Удалить ключ ${esc(p.label)}" ${p.key_set ? "" : 'style="visibility:hidden" tabindex="-1"'}>${icon("x")}</button>
+        </div></div>`;
+    }
+
     function render() {
       const o = settings.options;
+      const connected = settings.api_providers.filter((p) => p.configured);
       grid.innerHTML = `
         <section class="settings-card">
           <h2>${icon("theme")}Внешний вид</h2>
@@ -2999,22 +3015,22 @@
 
         <section class="settings-card">
           <h2>${icon("sparkles")}Создание конспектов</h2>
-          <p>Конспект пишет языковая модель. Проще всего — через твой аккаунт ChatGPT; можно использовать API-ключ или любой веб-чат вручную.</p>
+          <p>Конспект пишет языковая модель. Проще всего — через твой аккаунт ChatGPT; можно добавить API-ключи нескольких провайдеров или использовать любой веб-чат вручную.</p>
           <div class="setting"><div><div class="setting-title">Аккаунт ChatGPT</div><div class="setting-hint" id="account-hint">Проверяем…</div></div>
             <div class="setting-control" id="account-control"><span class="spinner"></span></div></div>
           <div class="setting"><div><div class="setting-title">Модель ChatGPT</div><div class="setting-hint">Например, gpt-5.5. Оставь как есть, если не уверен.</div></div>
             <div class="setting-control"><input class="input" id="s-chatgpt-model" value="${esc(settings.chatgpt_model)}" spellcheck="false"></div></div>
-          <div class="setting"><div><div class="setting-title">API-провайдер</div><div class="setting-hint">Для конспектов и чата по API-ключу.</div></div>
-            <div class="setting-control"><select class="select" id="s-provider">${o.providers
-              .map((p) => `<option value="${p.id}" ${p.id === settings.api_provider ? "selected" : ""}>${esc(p.label)}</option>`)
-              .join("")}</select></div></div>
-          <div class="setting"><div><div class="setting-title">Модель API</div></div>
-            <div class="setting-control"><input class="input" id="s-api-model" value="${esc(settings.api_model)}" spellcheck="false"></div></div>
-          <div class="setting"><div><div class="setting-title">API-ключ</div><div class="setting-hint">Хранится в системном хранилище паролей, не в файлах.</div></div>
-            <div class="setting-control"><input class="input" id="s-api-key" type="password" autocomplete="off" spellcheck="false"
-              placeholder="${settings.api_key_set ? "Ключ сохранён — введи новый, чтобы заменить" : "sk-…"}"></div></div>
+          ${settings.api_providers.map(apiRow).join("")}
+          ${
+            connected.length > 1
+              ? `<div class="setting"><div><div class="setting-title">API для чата</div><div class="setting-hint">Конспект можно создать через любой подключённый API.</div></div>
+            <div class="setting-control"><select class="select" id="s-provider">${connected
+              .map((p) => `<option value="${p.id}" ${p.id === settings.chat_provider ? "selected" : ""}>${esc(p.label)}</option>`)
+              .join("")}</select></div></div>`
+              : ""
+          }
           <div class="card-foot">
-            ${settings.api_key_set ? `<button type="button" class="btn btn-ghost" id="s-clear-key">Удалить ключ</button>` : ""}
+            <span class="grow faint small">API-ключи хранятся в системном хранилище паролей, не в файлах.</span>
             <button type="button" class="btn btn-primary" id="s-save-gen">Сохранить</button></div>
         </section>
 
@@ -3127,23 +3143,22 @@
           toast("Сохранено", { type: "success", timeout: 1800 });
         }
       });
-      $("#s-provider", grid).addEventListener("change", (event) => {
-        $("#s-api-model", grid).value = settings.options.default_models[event.target.value] || "";
-      });
-      const saveGeneration = async (clearKey = false) => {
-        const key = $("#s-api-key", grid).value.trim();
+      // Typed keys replace the saved ones; empty key fields leave them as they are.
+      const saveGeneration = async (clearKey = "") => {
         const payload = {
           chatgpt_model: $("#s-chatgpt-model", grid).value.trim(),
-          api_provider: $("#s-provider", grid).value,
-          api_model: $("#s-api-model", grid).value.trim(),
+          api_models: {},
+          api_keys: {},
         };
-        if (clearKey) {
-          payload.api_key_changed = true;
-          payload.api_key = "";
-        } else if (key) {
-          payload.api_key_changed = true;
-          payload.api_key = key;
-        }
+        $$("[data-api]", grid).forEach((row) => {
+          const id = row.dataset.api;
+          payload.api_models[id] = $("[data-api-model]", row).value.trim();
+          const key = $("[data-api-key]", row).value.trim();
+          if (key) payload.api_keys[id] = key;
+        });
+        if (clearKey) payload.api_keys[clearKey] = "";
+        const chatProvider = $("#s-provider", grid);
+        if (chatProvider) payload.api_provider = chatProvider.value;
         const result = await attempt(api("save_settings", payload));
         if (result) {
           settings = result;
@@ -3154,14 +3169,20 @@
           renderSystem();
         }
       };
-      $("#s-save-gen", grid).addEventListener("click", () => saveGeneration(false));
-      const clear = $("#s-clear-key", grid);
-      if (clear) {
-        clear.addEventListener("click", async () => {
-          const ok = await confirmDialog({ title: "Удалить API-ключ?", text: "Генерация по API станет недоступна, пока не добавишь ключ снова.", confirm: "Удалить", danger: true });
-          if (ok) saveGeneration(true);
-        });
-      }
+      $("#s-save-gen", grid).addEventListener("click", () => saveGeneration());
+      $$("[data-clear-key]", grid).forEach((button) =>
+        button.addEventListener("click", async () => {
+          const id = button.closest("[data-api]").dataset.api;
+          const label = settings.api_providers.find((p) => p.id === id).label;
+          const ok = await confirmDialog({
+            title: `Удалить ключ ${label}?`,
+            text: `Конспекты и чат через API ${label} станут недоступны, пока не добавишь ключ снова.`,
+            confirm: "Удалить",
+            danger: true,
+          });
+          if (ok) saveGeneration(id);
+        }),
+      );
       $("#s-open-data", grid).addEventListener("click", () => attempt(api("open_data_folder")));
       $("#s-recheck", grid).addEventListener("click", async (event) => {
         setBusy(event.currentTarget, true, "Проверяем…");

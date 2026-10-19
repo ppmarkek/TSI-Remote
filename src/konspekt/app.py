@@ -935,6 +935,13 @@ class StudyApp(tk.Tk):
             variable=self._settings_provider,
             command=self._settings_provider_changed,
         ).pack(side="left", padx=(16, 8), pady=4)
+        ttk.Radiobutton(
+            providers,
+            text="Gemini",
+            value="gemini",
+            variable=self._settings_provider,
+            command=self._settings_provider_changed,
+        ).pack(side="left", padx=(16, 8), pady=4)
 
         tk.Label(
             form,
@@ -1133,7 +1140,11 @@ class StudyApp(tk.Tk):
 
     def _settings_provider_changed(self) -> None:
         provider = self._settings_provider.get().strip().lower()
-        self._settings_api_model.set(default_model_for_provider(provider))
+        # Each provider keeps its own key and model.
+        self._settings_api_key.set(self.settings.api_keys.get(provider, ""))
+        self._settings_api_model.set(
+            self.settings.api_models.get(provider) or default_model_for_provider(provider)
+        )
         self._set_settings_status("", PALETTE["muted"])
 
     def _save_settings_from_form(self) -> None:
@@ -1146,7 +1157,8 @@ class StudyApp(tk.Tk):
             )
             return
 
-        proposed = AppSettings(
+        proposed = replace(
+            self.settings,
             api_provider=self._settings_provider.get().strip().lower(),
             api_model=self._settings_api_model.get().strip(),
             api_key=self._settings_api_key.get().strip(),

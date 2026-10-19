@@ -85,6 +85,11 @@
   box-sizing: border-box;
 }
 
+/* Classes such as .notice and .btn set display, which would override the attribute. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -2193,16 +2198,29 @@ button.ts:hover {
   width: 260px;
 }
 
+.setting-control .input-model {
+  width: 170px;
+}
+
+.setting-control .input-key {
+  width: 210px;
+}
+
 .setting-wide {
   grid-template-columns: minmax(0, 1fr);
 }
 
 .settings-card .card-foot {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
   padding: 14px 0 18px;
   border-top: 1px solid var(--border);
+}
+
+.settings-card .card-foot .grow {
+  flex: 1;
 }
 
 .check-row {

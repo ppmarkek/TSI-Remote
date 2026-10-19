@@ -119,7 +119,9 @@ class KonspektApi:
         self._startup_warning = startup_warning
         self._study = StudyStore(data_dir / "study.json")
         self._chat = ChatService(
-            ChatStore(data_dir / "chats.json"), self._settings, streamer=chat_streamer
+            ChatStore(data_dir / "chats.json"),
+            lambda: self._settings().preferred_api(),
+            streamer=chat_streamer,
         )
         self._window: Any = None
         self._chrome_handler: Callable[[bool], None] | None = None
@@ -360,10 +362,11 @@ class KonspektApi:
                 cancellation_token=token,
             )
             return f"Конспект готов (ChatGPT, {result.model})."
-        if provider == "api":
+        api_provider = self._api_provider(provider)
+        if api_provider:
             from ..api_generation import generate_lesson_via_api
 
-            settings = self._settings()
+            settings = self._settings().for_provider(api_provider)
             if model:
                 settings = replace(settings, api_model=model)
             api_result = generate_lesson_via_api(
@@ -389,9 +392,17 @@ class KonspektApi:
                 },
             )
 
-    def _limit_key(self, provider: str) -> str:
+    def _api_provider(self, provider: str) -> str | None:
+        """The API behind a generation choice: "api" (the default) or "api:<provider>"."""
+
         if provider == "api":
-            return self._settings().api_provider
+            return self._settings().preferred_api().api_provider
+        return _named_api_provider(provider)
+
+    def _limit_key(self, provider: str) -> str:
+        api_provider = self._api_provider(provider)
+        if api_provider:
+            return api_provider
         return {"manual": "deepseek_web"}.get(provider, provider)
 
     def _check_outbound_size(self, directory: Path, limit_key: str) -> tuple[int, int]:
@@ -577,12 +588,24 @@ class KonspektApi:
         prompt = (directory / "lesson-prompt.md").read_text(encoding="utf-8")
         characters = len(context) + len(prompt)
         size = len(context.encode("utf-8")) + len(prompt.encode("utf-8"))
+        # Every API with a key is offered; without any, one entry points to the settings.
+        choices: list[tuple[str, str, str, bool]] = [
+            ("chatgpt", "ChatGPT (твой аккаунт)", settings.chatgpt_model, True)
+        ]
+        choices.extend(
+            (
+                f"api:{name}",
+                f"API {PROVIDER_LABELS[name]}",
+                settings.api_models[name],
+                True,
+            )
+            for name in settings.configured_providers
+        )
+        if not settings.configured_providers:
+            choices.append(("api", "По API-ключу", "", False))
+        choices.append(("manual", "Вручную через веб-чат", "", True))
         providers = []
-        for provider_id, label, model in (
-            ("chatgpt", "ChatGPT (твой аккаунт)", settings.chatgpt_model),
-            ("api", f"API {settings.provider_label}", settings.api_model),
-            ("manual", "Вручную через веб-чат", ""),
-        ):
+        for provider_id, label, model, configured in choices:
             warning = ""
             try:
                 validate_provider_context_limits(self._limit_key(provider_id), characters, size)
@@ -593,7 +616,7 @@ class KonspektApi:
                     "id": provider_id,
                     "label": label,
                     "model": model,
-                    "configured": settings.api_configured if provider_id == "api" else True,
+                    "configured": configured,
                     "limit_warning": warning,
                 }
             )
@@ -619,10 +642,13 @@ class KonspektApi:
     def generate(self, key: str, provider: str, model: str = "") -> dict[str, Any]:
         recording = self._recording(key)
         directory = self._directory(recording)
-        if provider not in {"chatgpt", "api"}:
+        api_provider = self._api_provider(provider)
+        if provider != "chatgpt" and api_provider is None:
             raise UserFacingError("Выбери, через что создать конспект.")
-        if provider == "api" and not self._settings().api_configured:
-            raise UserFacingError("Сначала добавь API-ключ в настройках.")
+        if api_provider and not self._settings().provider_configured(api_provider):
+            raise UserFacingError(
+                f"Сначала добавь API-ключ {PROVIDER_LABELS[api_provider]} в настройках."
+            )
         self._ensure_package(recording, directory)
         self._check_outbound_size(directory, self._limit_key(provider))
         task = self._tasks.submit(
@@ -945,7 +971,7 @@ class KonspektApi:
     # =================================================================== chat
     @_bridge
     def chat_list(self) -> dict[str, Any]:
-        settings = self._settings()
+        settings = self._settings().preferred_api()
         return {
             "chats": self._chat.store.list_chats(),
             "api_configured": settings.api_configured,
@@ -995,18 +1021,30 @@ class KonspektApi:
         provider = str(values.get("api_provider", current.api_provider))
         if provider not in SUPPORTED_PROVIDERS:
             provider = current.api_provider
-        api_key = current.api_key
-        if values.get("api_key_changed"):
-            api_key = str(values.get("api_key", "")).strip()
+        # Only the providers named in the request change; an empty key removes it.
+        models = dict(current.api_models)
+        new_models = values.get("api_models")
+        if isinstance(new_models, dict):
+            for name in SUPPORTED_PROVIDERS:
+                if name in new_models:
+                    models[name] = str(new_models[name] or "").strip()
+        keys = dict(current.api_keys)
+        new_keys = values.get("api_keys")
+        if isinstance(new_keys, dict):
+            for name in SUPPORTED_PROVIDERS:
+                if name in new_keys:
+                    keys[name] = str(new_keys[name] or "").strip()
         try:
             interval = int(values.get("frame_interval_seconds", current.frame_interval_seconds))
         except (TypeError, ValueError):
             interval = current.frame_interval_seconds
-        updated = AppSettings(
+        updated = replace(
+            current,
             api_provider=provider,
-            api_model=str(values.get("api_model", current.api_model)).strip()
-            or default_model_for_provider(provider),
-            api_key=api_key,
+            api_model=models[provider] or default_model_for_provider(provider),
+            api_key=keys[provider],
+            api_models=models,
+            api_keys=keys,
             chatgpt_model=str(values.get("chatgpt_model", current.chatgpt_model)).strip()
             or current.chatgpt_model,
             whisper_model=str(values.get("whisper_model", current.whisper_model)),
@@ -1109,10 +1147,10 @@ def lecture_key(recording: BBBRecording) -> str:
 def _follow_up(then_generate: Any) -> dict[str, Any]:
     """Task params that make a finished preparation start generation automatically."""
 
-    if not isinstance(then_generate, dict) or then_generate.get("provider") not in {
-        "chatgpt",
-        "api",
-    }:
+    if not isinstance(then_generate, dict):
+        return {}
+    provider = then_generate.get("provider")
+    if provider not in {"chatgpt", "api"} and _named_api_provider(provider) is None:
         return {}
     return {
         "then_generate": {
@@ -1122,14 +1160,38 @@ def _follow_up(then_generate: Any) -> dict[str, Any]:
     }
 
 
+def _named_api_provider(provider: Any) -> str | None:
+    """``claude`` for the generation choice ``api:claude``."""
+
+    if not isinstance(provider, str) or not provider.startswith("api:"):
+        return None
+    name = provider[len("api:") :]
+    return name if name in SUPPORTED_PROVIDERS else None
+
+
 def _settings_payload(settings: AppSettings) -> dict[str, Any]:
+    preferred = settings.preferred_api()
     return {
         "api_provider": settings.api_provider,
         "api_model": settings.api_model,
         "api_key_set": bool(settings.api_key.strip()),
         "api_key_placeholder": _PLACEHOLDER_KEY if settings.api_key.strip() else "",
-        "api_configured": settings.api_configured,
-        "provider_label": settings.provider_label,
+        # The chat and the plain "api" choice use this one.
+        "api_configured": preferred.api_configured,
+        "provider_label": preferred.provider_label,
+        "api_providers": [
+            {
+                "id": name,
+                "label": PROVIDER_LABELS[name],
+                "model": settings.api_models[name],
+                "default_model": default_model_for_provider(name),
+                "key_set": bool(settings.api_keys[name].strip()),
+                "configured": settings.provider_configured(name),
+            }
+            for name in SUPPORTED_PROVIDERS
+        ],
+        "configured_providers": list(settings.configured_providers),
+        "chat_provider": preferred.api_provider,
         "chatgpt_model": settings.chatgpt_model,
         "whisper_model": settings.whisper_model,
         "frame_interval_seconds": settings.frame_interval_seconds,

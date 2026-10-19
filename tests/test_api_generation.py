@@ -203,6 +203,60 @@ class ApiGenerationTests(unittest.TestCase):
         self.assertNotIn("private-meeting-id", sent_text)
         self.assertEqual(result.saved_lesson.path.name, "lesson.md")
 
+    def test_gemini_uses_its_openai_compatible_endpoint(self) -> None:
+        settings = AppSettings(
+            api_provider="gemini", api_model="gemini-3.8-flash", api_key="AIza-test"
+        )
+        session = FakeSession(
+            FakeResponse(200, {"choices": [{"message": {"content": "# Gemini lesson"}}]})
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self._write_context(directory)
+            result = generate_lesson_via_api(
+                self.recording, settings, directory=directory, session=session
+            )
+            lesson = result.saved_lesson.path.read_text(encoding="utf-8")
+
+        self.assertEqual(lesson, "# Gemini lesson\n")
+        self.assertEqual((result.provider, result.model), ("Gemini", "gemini-3.8-flash"))
+        call = session.calls[0]
+        self.assertEqual(
+            call["url"],
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        )
+        self.assertEqual(call["headers"]["Authorization"], "Bearer AIza-test")
+        self.assertEqual(call["json"]["model"], "gemini-3.8-flash")
+        self.assertNotIn("thinking", call["json"])
+        self.assertEqual([m["role"] for m in call["json"]["messages"]], ["system", "user"])
+        self.assertIn("Useful local material", call["json"]["messages"][-1]["content"])
+
+    def test_gemini_invalid_key_is_reported_as_a_key_error(self) -> None:
+        # Gemini answers a wrong key with 400 and the error wrapped in a list.
+        body = [
+            {
+                "error": {
+                    "code": 400,
+                    "message": "API key not valid. Please pass a valid API key.",
+                    "status": "INVALID_ARGUMENT",
+                    "details": [{"reason": "API_KEY_INVALID"}],
+                }
+            }
+        ]
+        settings = AppSettings(api_provider="gemini", api_key="AIza-wrong")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self._write_context(directory)
+            with self.assertRaisesRegex(ApiGenerationError, "ключ не принят"):
+                generate_lesson_via_api(
+                    self.recording,
+                    settings,
+                    directory=directory,
+                    session=FakeSession(FakeResponse(400, body)),
+                )
+
     def test_rejects_success_response_without_lesson_text(self) -> None:
         session = FakeSession(FakeResponse(200, {"output": []}))
 
