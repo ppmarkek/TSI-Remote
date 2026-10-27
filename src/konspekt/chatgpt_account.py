@@ -403,7 +403,7 @@ class _AppServerSession:
                 "clientInfo": {
                     "name": "konspekt",
                     "title": "Konspekt",
-                    "version": "0.3.0",
+                    "version": "0.3.1",
                 }
             },
             timeout=_REQUEST_TIMEOUT_SECONDS,
