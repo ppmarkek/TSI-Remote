@@ -192,6 +192,30 @@ class OutboundContextTests(unittest.TestCase):
                 slides=(SlideInfo("s1", "meetingId=secret-meeting-room-999"),),
             )
 
+    def test_redacts_browser_chrome_in_screen_notes_instead_of_rejecting(self) -> None:
+        ctx = build_outbound_context(
+            self.recording.title,
+            screen_notes=(
+                ScreenNote(
+                    240.0,
+                    "frame-1.jpg",
+                    "bbb.example.test/html5client/join?sessionToken=ijtreajjahoqnma MESSAGES",
+                ),
+                ScreenNote(270.0, "frame-2.jpg", "Room secret-meeting-id-12345 is open"),
+                ScreenNote(300.0, "frame-3.jpg", "$s3 = 1111 0011/0000/0000/0000"),
+            ),
+            meeting_id=self.recording.meeting_id,
+            source_url=self.recording.source_url,
+        )
+
+        md = ctx.render_markdown()
+        self.assertEqual(len(ctx.screen_notes), 3)
+        self.assertNotIn("ijtreajjahoqnma", md)
+        self.assertNotIn("secret-meeting-id-12345", md)
+        self.assertIn("MESSAGES", md)
+        self.assertIn("[REDACTED_SECRET]", md)
+        self.assertIn("Room [REDACTED_ID] is open", md)
+
     def test_validate_provider_context_limits(self) -> None:
         from konspekt.outbound_context import validate_provider_context_limits
 

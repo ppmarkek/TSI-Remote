@@ -281,7 +281,7 @@ def build_outbound_context(
             text = str(note.get("text", ""))
         else:
             continue
-        clean_text = _normalise_text(text)
+        clean_text = _redact_screen_text(_normalise_text(text), forbidden)
         fingerprint = clean_text.casefold()
         if not clean_text or fingerprint in seen_note_text:
             continue
@@ -358,6 +358,18 @@ def redact_sensitive_strings(text: str) -> str:
     redacted = _FORBIDDEN_PATH_PATTERN.sub("[REDACTED_PATH]", redacted)
     redacted = _FORBIDDEN_IDENTIFIER_PATTERN.sub("[REDACTED_ID]", redacted)
     return redacted
+
+
+def _redact_screen_text(text: str, forbidden_values: Sequence[str]) -> str:
+    """Mask sensitive fragments in OCR text instead of rejecting the whole lecture.
+
+    Screen captures routinely include browser chrome such as the BigBlueButton
+    address bar with ``sessionToken=...``, which the lecturer never meant to share.
+    """
+    for val in forbidden_values:
+        if val:
+            text = text.replace(val, "[REDACTED_ID]")
+    return redact_sensitive_strings(text)
 
 
 def _validate_outbound_text(
